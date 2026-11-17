@@ -37,7 +37,11 @@ const YTDLP = process.env.YTDLP_PATH || 'yt-dlp';
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 // ספק ה-PO Token (bgutil). בלעדיו יוטיוב מחזיר "Sign in to confirm you're not a bot"
 // לכל בקשה משרת בענן. ראו Dockerfile.
-const POT_BASE_URL = process.env.POT_BASE_URL || 'http://127.0.0.1:4416';
+// ערך ריק = מכבים את ספק ה-PO Token לגמרי (חוסך זיכרון ו-18 שניות לכל שיר).
+// שימו לב: || לא מתאים כאן, כי מחרוזת ריקה הייתה נופלת חזרה לברירת המחדל.
+const POT_BASE_URL = process.env.POT_BASE_URL === undefined
+  ? 'http://127.0.0.1:4416'
+  : String(process.env.POT_BASE_URL).trim();
 
 // עוגיות יוטיוב: מכתובת דאטה-סנטר (ענן) ה-PO Token לבדו לא תמיד עובר את
 // בדיקת הבוט, וצריך עוגיות של חשבון מחובר. מחלצים אותן עם tools/firefox_cookies.py
