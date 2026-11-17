@@ -238,13 +238,18 @@ function ensureSilence() {
 // הנוסחה המדויקת שעובדת מול יוטיוב משרת בענן: ספק PO Token + לקוח mweb.
 function ytdlpArgs(url) {
   return [
-    '--no-warnings', '--no-playlist', '--no-progress',
+    // בלי --no-warnings, כדי שאזהרות על PO Token ועל פורמטים שדולגו יופיעו בלוג
+    '--no-playlist', '--no-progress',
     '--extractor-args', 'youtubepot-bgutilhttp:base_url=' + POT_BASE_URL,
-    '--extractor-args', 'youtube:player_client=default,mweb',
+    // tv ו-web_safari הם הלקוחות היציבים ביותר לחילוץ אודיו ב-2026 (mweb הפך
+    // ל-SABR בחלק מהסשנים). mweb נשאר כגיבוי. כולם עוברים דרך ספק ה-PO Token.
+    // ניתן לעקוף במשתנה YT_CLIENTS בלי לשנות קוד.
+    '--extractor-args', 'youtube:player_client=' + (process.env.YT_CLIENTS || 'tv,web_safari,mweb'),
     '--extractor-retries', '3',
     '--socket-timeout', '20',
-    // מעדיפים זרם אודיו דל-קצב: איכות טלפון בכל מקרה, וכך פחות תעבורה
-    '-f', 'bestaudio[abr<=80]/bestaudio/best',
+    // bestaudio, ואם אין - פורמט 18 (אודיו+וידאו משולב, תמיד זמין ולא SABR);
+    // ffmpeg מוציא ממנו רק את האודיו. ניתן לעקוף במשתנה YT_FORMAT.
+    '-f', process.env.YT_FORMAT || 'bestaudio/18/best',
     '-o', '-', url
   ];
 }
@@ -287,8 +292,9 @@ function startStream(s, videoId) {
 
   ff.on('close', () => {
     s.ffDone = true;
-    if (dlErr.trim()) console.error('yt-dlp:', dlErr.trim().slice(0, 300));
-    if (ffErr.trim()) console.error('ffmpeg:', ffErr.trim().slice(0, 300));
+    // השגיאה האמיתית של yt-dlp יושבת בסוף הפלט, לכן לוקחים את הזנב ולא את הראש
+    if (dlErr.trim()) console.error('yt-dlp:', dlErr.trim().slice(-1500));
+    if (ffErr.trim()) console.error('ffmpeg:', ffErr.trim().slice(-400));
   });
 
   s.pump = pump(s).catch(e => { console.error('העלאת קטעים נכשלה:', e.message); s.pumpDone = true; });
@@ -582,7 +588,7 @@ app.get('/trystream', async (req, res) => {
       title: items[0].title, videoId: items[0].id,
       ms: Date.now() - t0, ffmpegExit: code, wavBytes: bytes,
       ok: bytes > 10000,
-      stderr: err.trim().slice(0, 600) || undefined
+      stderr: err.trim().slice(-1200) || undefined
     });
   } catch (e) {
     res.status(500).json({ error: String(e.message).slice(0, 300) });
