@@ -279,6 +279,12 @@ function ytdlpArgs(url) {
     // ניתן לעקוף במשתנה YT_CLIENTS בלי לשנות קוד.
     '--extractor-args', 'youtube:player_client=' + (process.env.YT_CLIENTS || 'tv,web_safari,mweb'),
     ...(COOKIE_FILE ? ['--cookies', COOKIE_FILE] : []),
+    // מנוע JavaScript לפתרון אתגרי החתימה של יוטיוב. Deno מותקן בתמונה,
+    // ו-node הוא גיבוי (שניהם נתמכים רשמית: Deno 2.3+, Node 22+).
+    '--js-runtimes', process.env.YT_JS_RUNTIMES || 'deno,node',
+    // סקריפטי הפענוח (yt-dlp-ejs) לא מגיעים עם הבינארי הזה, ולכן
+    // נמשכים מגיטהאב בפעם הראשונה ונשמרים במטמון.
+    '--remote-components', process.env.YT_EJS || 'ejs:github',
     '--extractor-retries', '3',
     '--socket-timeout', '20',
     // bestaudio, ואם אין - פורמט 18 (אודיו+וידאו משולב, תמיד זמין ולא SABR);
@@ -577,6 +583,13 @@ app.get('/selftest', async (req, res) => {
     p.stdout.on('data', d => { o += d; });
     p.on('error', e => bad(new Error(YTDLP + ': ' + e.message)));
     p.on('close', c => (c === 0 ? ok(o.trim()) : bad(new Error('יצא עם קוד ' + c))));
+  }));
+  await t('deno', () => new Promise((ok, bad) => {
+    const p = spawn('deno', ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let o = '';
+    p.stdout.on('data', d => { o += d; });
+    p.on('error', () => bad(new Error('deno לא מותקן - yt-dlp לא יוכל לפתור חתימות יוטיוב')));
+    p.on('close', c => (c === 0 ? ok(o.split('\n')[0]) : bad(new Error('יצא עם קוד ' + c))));
   }));
   await t('ffmpeg', () => new Promise((ok, bad) => {
     const p = spawn(FFMPEG, ['-version'], { stdio: ['ignore', 'pipe', 'pipe'] });

@@ -16,11 +16,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 \
       ca-certificates \
       curl \
+      unzip \
  && rm -rf /var/lib/apt/lists/* \
  # קישור סימבולי: בזמן ריצה ה-PATH לפעמים מצומצם ו-ffmpeg לא נמצא
  && ln -sf /usr/bin/ffmpeg /usr/local/bin/ffmpeg \
  && ln -sf /usr/bin/ffprobe /usr/local/bin/ffprobe \
  && ffmpeg -version | head -1
+
+# Deno: מנוע JavaScript. yt-dlp חייב אותו כדי לפתור את אתגרי החתימה
+# של יוטיוב (signature / n challenge). בלעדיו כל הפורמטים נחסמים
+# והשגיאה היא "The page needs to be reloaded".
+ADD https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip /tmp/deno.zip
+RUN unzip -o /tmp/deno.zip -d /usr/local/bin \
+ && chmod 755 /usr/local/bin/deno \
+ && rm -f /tmp/deno.zip \
+ && deno --version
 
 # ADD עם כתובת נבדק מחדש בכל בנייה, ולכן גרסה חדשה של yt-dlp נמשכת לבד.
 # ה-nightly ולא ה-stable: תיקונים לשינויים של יוטיוב מגיעים לשם קודם.
