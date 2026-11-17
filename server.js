@@ -39,6 +39,39 @@ const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 // לכל בקשה משרת בענן. ראו Dockerfile.
 const POT_BASE_URL = process.env.POT_BASE_URL || 'http://127.0.0.1:4416';
 
+// עוגיות יוטיוב: מכתובת דאטה-סנטר (ענן) ה-PO Token לבדו לא תמיד עובר את
+// בדיקת הבוט, וצריך עוגיות של חשבון מחובר. מחלצים אותן עם tools/firefox_cookies.py
+// ומדביקים כ-COOKIES_B64. הפענוח כאן סלחני לכל צורות ההדבקה (base64, UTF-16,
+// BEGIN/END, או טקסט Netscape גולמי) - תואם ל-cookies.js של הפרויקט הקודם.
+const COOKIES_B64 = process.env.COOKIES_B64 || '';
+let COOKIE_FILE = '';
+function setupCookies() {
+  const raw = COOKIES_B64.trim();
+  if (!raw) { console.log('עוגיות: לא הוגדרו (COOKIES_B64 ריק)'); return; }
+  try {
+    let text;
+    if (raw.includes('\t') || /^#\s*(Netscape\s+)?HTTP Cookie File/i.test(raw)) {
+      text = raw; // כבר טקסט Netscape
+    } else {
+      const b64 = raw.replace(/-----(BEGIN|END)[^-]*-----/g, '').replace(/\s+/g, '');
+      const buf = Buffer.from(b64, 'base64');
+      const utf16 = (buf[0] === 0xff && buf[1] === 0xfe) || (buf.length > 1 && buf[1] === 0);
+      text = buf.toString(utf16 ? 'utf16le' : 'utf8');
+    }
+    const body = text.replace(/^﻿/, '').replace(/\r\n?/g, '\n').trim();
+    // yt-dlp דוחה קובץ בלי שורת הכותרת הזאת
+    const header = /^#\s*(Netscape\s+)?HTTP Cookie File/i.test(body) ? '' : '# Netscape HTTP Cookie File\n';
+    COOKIE_FILE = path.join(os.tmpdir(), 'yt-cookies.txt');
+    fs.writeFileSync(COOKIE_FILE, header + body + '\n');
+    const lines = body.split('\n').filter(l => l && !l.startsWith('#'));
+    const hasLogin = /__Secure-3PSID|__Secure-1PSID|\bSID\b/.test(body);
+    console.log('עוגיות: נטענו ' + lines.length + ' שורות' + (hasLogin ? ' (כולל עוגיית התחברות)' : ' (ללא עוגיית התחברות - אולי לא מחובר)'));
+  } catch (e) {
+    console.error('עוגיות: פענוח נכשל -', e.message);
+    COOKIE_FILE = '';
+  }
+}
+
 // שלוחת הקבצים בימות: שם נשמרות ההקלטות והקטעים. תיקייה רגילה, לא API.
 const EXT = (process.env.EXT_PATH || '1').replace(/^\/+|\/+$/g, '');
 const EXTP = '/' + EXT;
@@ -245,6 +278,7 @@ function ytdlpArgs(url) {
     // ל-SABR בחלק מהסשנים). mweb נשאר כגיבוי. כולם עוברים דרך ספק ה-PO Token.
     // ניתן לעקוף במשתנה YT_CLIENTS בלי לשנות קוד.
     '--extractor-args', 'youtube:player_client=' + (process.env.YT_CLIENTS || 'tv,web_safari,mweb'),
+    ...(COOKIE_FILE ? ['--cookies', COOKIE_FILE] : []),
     '--extractor-retries', '3',
     '--socket-timeout', '20',
     // bestaudio, ואם אין - פורמט 18 (אודיו+וידאו משולב, תמיד זמין ולא SABR);
@@ -531,6 +565,12 @@ app.get('/selftest', async (req, res) => {
     if (!r) throw new Error('לא מאזין ב-' + POT_BASE_URL + ' (יוטיוב ייחסם)');
     return 'מאזין';
   });
+  await t('cookies', async () => {
+    if (!COOKIE_FILE) throw new Error('COOKIES_B64 ריק - מכתובת ענן יוטיוב עלול לחסום בלי עוגיות');
+    const body = fs.readFileSync(COOKIE_FILE, 'utf8');
+    if (!/__Secure-3PSID|__Secure-1PSID|\bSID\b/.test(body)) throw new Error('אין עוגיית התחברות - ייתכן שלא היית מחובר ליוטיוב');
+    return 'נטענו (כולל עוגיית התחברות)';
+  });
   await t('ytdlp', () => new Promise((ok, bad) => {
     const p = spawn(YTDLP, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
     let o = '';
@@ -595,6 +635,7 @@ app.get('/trystream', async (req, res) => {
   }
 });
 
+setupCookies();
 app.listen(PORT, () => {
   console.log('קו שירים AI מאזין על פורט ' + PORT);
   console.log('  שלוחת קבצים: ' + EXTP + ' | קטע: ' + SEG_SEC + 'ש | שרשרת: ' + CHAIN);
