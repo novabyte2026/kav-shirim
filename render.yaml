@@ -23,3 +23,8 @@ services:
         sync: false
       - key: GEMINI_API_KEYS
         sync: false
+      # עוגיות יוטיוב. נדרש! בלעדיהן יוטיוב מחזיר "Sign in to confirm
+      # you're not a bot" מכל כתובת ענן - נמדד ב-17.11.2026 על Codespaces.
+      # מייצרים עם refresh-cookies.py (מעתיק ללוח).
+      - key: COOKIES_B64
+        sync: false
