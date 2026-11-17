@@ -1,0 +1,25 @@
+# פריסה ב-Render בלחיצה אחת (Blueprint). בלי כרטיס אשראי.
+#
+# אזהרה: התוכנית החינמית היא 512MB זיכרון ו-0.1 CPU, והשירות נרדם
+# אחרי 15 דקות בלי תנועה. צריך מעיר חיצוני (ראו README).
+services:
+  - type: web
+    name: kav-shirim
+    runtime: docker
+    plan: free
+    region: frankfurt          # הקרוב ביותר לישראל מבין אזורי Render
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /
+    envVars:
+      - key: EXT_PATH
+        value: "8"
+      # קטעים ארוכים יותר = פחות סבבים = פחות עבודה ל-0.1 CPU
+      - key: SEG_SEC
+        value: "20"
+      - key: CHAIN
+        value: "3"
+      # הסודות נכנסים ידנית בלוח הבקרה של Render, לא בקובץ הזה
+      - key: YEMOT_TOKEN
+        sync: false
+      - key: GEMINI_API_KEYS
+        sync: false

@@ -1,0 +1,16 @@
+{
+  "name": "kav-shirim-ai",
+  "version": "1.0.0",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "description": "Kav Shirim AI: Hebrew voice phone line that finds a song on YouTube and streams it to the caller through Yemot HaMashiach"
+}
