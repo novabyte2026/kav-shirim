@@ -3,8 +3,16 @@
 # אם אחד מהם מת, המכולה יוצאת, והמאחסן מרים אותה מחדש.
 set -e
 
+# POT_BASE_URL ריק = לא מפעילים את ספק ה-PO Token בכלל (חוסך הרבה זיכרון
+# על מכונה של 512MB). עם עוגיות תקינות יוטיוב לרוב לא דורש אותו.
+if [ -z "${POT_BASE_URL:-}" ]; then
+  echo "ספק ה-PO Token מושבת (POT_BASE_URL ריק); מפעיל רק את השרת"
+  exec node server.js
+fi
+
 echo "מפעיל את ספק ה-PO Token..."
-node /opt/bgutil/build/main.js --port 4416 &
+# תקרת זיכרון: בלעדיה הוא יכול לנפח ולהפיל את כל המכולה ב-512MB
+node --max-old-space-size=160 /opt/bgutil/build/main.js --port 4416 &
 POT_PID=$!
 
 # ממתינים שהספק יאזין. בלעדיו הבקשה הראשונה ליוטיוב תיכשל.

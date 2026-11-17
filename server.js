@@ -87,16 +87,17 @@ const SEG_SEC = Math.min(30, Math.max(4, parseInt(process.env.SEG_SEC, 10) || 15
 const CHAIN = Math.min(8, Math.max(1, parseInt(process.env.CHAIN, 10) || 4));
 const MAX_SEC = Math.min(1800, Math.max(60, (parseInt(process.env.SONG_MAX_MIN, 10) || 10) * 60));
 // עד כמה קטעים מעלים מראש לפני מקום ההשמעה. מונע העלאת שיר שלם שידלגו עליו.
-const LOOKAHEAD = Math.min(40, Math.max(2, parseInt(process.env.LOOKAHEAD, 10) || 8));
+// כמה קטעים מראש. נמוך = פחות זיכרון ופחות העלאות במקביל על מכונה חלשה.
+const LOOKAHEAD = Math.min(40, Math.max(2, parseInt(process.env.LOOKAHEAD, 10) || 3));
 const PREP_MS = Math.min(180000, Math.max(10000, parseInt(process.env.PREP_MS, 10) || 75000));
 
 // שיפור השמע לטלפון. קו טלפון הוא 8kHz, ומוזיקה נשמעת בו חלשה ועמומה
 // כי יש לה טווח דינמי רחב. dynaudnorm מיישר את עוצמת הקול כך שגם
 // הקטעים השקטים נשמעים, ו-highpass מוריד רעש נמוך שמבזבז עוצמה.
 // ניתן לכבות או לשנות במשתנה AUDIO_FILTER (ערך ריק = בלי עיבוד).
-const AUDIO_FILTER = process.env.AUDIO_FILTER === undefined
-  ? 'highpass=f=100,dynaudnorm=f=150:g=15'
-  : String(process.env.AUDIO_FILTER).trim();
+// ברירת המחדל: כבוי. על מכונה חלשה (0.1 CPU) העיבוד הזה מאט את ffmpeg
+// ומוסיף זיכרון, ועלול להפיל את המכולה. להפעלה: AUDIO_FILTER=highpass=f=100,dynaudnorm=f=150:g=15
+const AUDIO_FILTER = String(process.env.AUDIO_FILTER || '').trim();
 
 const PORT = process.env.PORT || 3000;
 
@@ -281,7 +282,9 @@ function ytdlpArgs(url) {
   return [
     // בלי --no-warnings, כדי שאזהרות על PO Token ועל פורמטים שדולגו יופיעו בלוג
     '--no-playlist', '--no-progress',
-    '--extractor-args', 'youtubepot-bgutilhttp:base_url=' + POT_BASE_URL,
+    // ספק ה-PO Token הוא צרכן הזיכרון הגדול ביותר. עם עוגיות תקינות הוא
+    // לא תמיד נחוץ. POT_BASE_URL ריק = לא משתמשים בו בכלל.
+    ...(POT_BASE_URL ? ['--extractor-args', 'youtubepot-bgutilhttp:base_url=' + POT_BASE_URL] : []),
     // tv ו-web_safari הם הלקוחות היציבים ביותר לחילוץ אודיו ב-2026 (mweb הפך
     // ל-SABR בחלק מהסשנים). mweb נשאר כגיבוי. כולם עוברים דרך ספק ה-PO Token.
     // ניתן לעקוף במשתנה YT_CLIENTS בלי לשנות קוד.
