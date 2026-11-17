@@ -88,7 +88,15 @@ const CHAIN = Math.min(8, Math.max(1, parseInt(process.env.CHAIN, 10) || 4));
 const MAX_SEC = Math.min(1800, Math.max(60, (parseInt(process.env.SONG_MAX_MIN, 10) || 10) * 60));
 // עד כמה קטעים מעלים מראש לפני מקום ההשמעה. מונע העלאת שיר שלם שידלגו עליו.
 const LOOKAHEAD = Math.min(40, Math.max(2, parseInt(process.env.LOOKAHEAD, 10) || 8));
-const PREP_MS = Math.min(120000, Math.max(10000, parseInt(process.env.PREP_MS, 10) || 60000));
+const PREP_MS = Math.min(180000, Math.max(10000, parseInt(process.env.PREP_MS, 10) || 75000));
+
+// שיפור השמע לטלפון. קו טלפון הוא 8kHz, ומוזיקה נשמעת בו חלשה ועמומה
+// כי יש לה טווח דינמי רחב. dynaudnorm מיישר את עוצמת הקול כך שגם
+// הקטעים השקטים נשמעים, ו-highpass מוריד רעש נמוך שמבזבז עוצמה.
+// ניתן לכבות או לשנות במשתנה AUDIO_FILTER (ערך ריק = בלי עיבוד).
+const AUDIO_FILTER = process.env.AUDIO_FILTER === undefined
+  ? 'highpass=f=100,dynaudnorm=f=150:g=15'
+  : String(process.env.AUDIO_FILTER).trim();
 
 const PORT = process.env.PORT || 3000;
 
@@ -314,6 +322,7 @@ function startStream(s, videoId) {
     '-y', '-v', 'error',
     '-i', 'pipe:0',
     '-vn', '-t', String(MAX_SEC),
+    ...(AUDIO_FILTER ? ['-af', AUDIO_FILTER] : []),
     '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le',
     '-f', 'segment', '-segment_time', String(SEG_SEC), '-reset_timestamps', '1',
     path.join(s.dir, 'p%05d.wav')
@@ -624,6 +633,7 @@ app.get('/trystream', async (req, res) => {
     s.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kavtest-'));
     const dl = spawn(YTDLP, ytdlpArgs('https://www.youtube.com/watch?v=' + items[0].id), { stdio: ['ignore', 'pipe', 'pipe'] });
     const ff = spawn(FFMPEG, ['-y', '-v', 'error', '-i', 'pipe:0', '-vn', '-t', '12',
+      ...(AUDIO_FILTER ? ['-af', AUDIO_FILTER] : []),
       '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', path.join(s.dir, 'out.wav')], { stdio: ['pipe', 'ignore', 'pipe'] });
     let err = '';
     dl.stderr.on('data', d => { err += d.toString(); });
