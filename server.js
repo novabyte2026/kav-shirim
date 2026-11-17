@@ -287,9 +287,10 @@ function ytdlpArgs(url) {
     // ניתן לעקוף במשתנה YT_CLIENTS בלי לשנות קוד.
     '--extractor-args', 'youtube:player_client=' + (process.env.YT_CLIENTS || 'tv,web_safari,mweb'),
     ...(COOKIE_FILE ? ['--cookies', COOKIE_FILE] : []),
-    // מנוע JavaScript לפתרון אתגרי החתימה של יוטיוב. Deno מותקן בתמונה,
-    // ו-node הוא גיבוי (שניהם נתמכים רשמית: Deno 2.3+, Node 22+).
-    '--js-runtimes', process.env.YT_JS_RUNTIMES || 'deno,node',
+    // מנוע JavaScript לפתרון אתגרי החתימה של יוטיוב: Deno מותקן בתמונה
+    // והוא ברירת המחדל של yt-dlp, ולכן אין צורך בדגל. (ערך עם פסיק כמו
+    // "deno,node" נדחה כשם מנוע אחד שלא קיים, ולכן הוסר.)
+    ...(process.env.YT_JS_RUNTIMES ? ['--js-runtimes', process.env.YT_JS_RUNTIMES] : []),
     // סקריפטי הפענוח (yt-dlp-ejs) לא מגיעים עם הבינארי הזה, ולכן
     // נמשכים מגיטהאב בפעם הראשונה ונשמרים במטמון.
     '--remote-components', process.env.YT_EJS || 'ejs:github',
