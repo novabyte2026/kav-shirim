@@ -1,0 +1,14 @@
+{
+  "time": "2026-11-17T17:28:43Z",
+  "codespace": "cautious-memory-xrrp7rrv9p95fpxqp",
+  "github_url": "https://cautious-memory-xrrp7rrv9p95fpxqp-3000.app.github.dev",
+  "github_yemot": "https://cautious-memory-xrrp7rrv9p95fpxqp-3000.app.github.dev/yemot",
+  "github_external": {"code":"200","body":"ok"},
+  "cloudflare_url": "https://bali-enclosure-ward-poem.trycloudflare.com",
+  "cloudflare_yemot": "https://bali-enclosure-ward-poem.trycloudflare.com/yemot",
+  "cloudflare_external": {"code":"000000","body":"ok"},
+  "port_visibility": "public (gh)",
+  "server_up": "yes",
+  "trystream": {"title":"עוזי חיטמן אדון עולם","videoId":"v6MfMZ7x028","ms":10704,"ffmpegExit":0,"wavBytes":192070,"ok":true,"stderr":"[youtube] Extracting URL: https://www.youtube.com/watch?v=v6MfMZ7x028\n[youtube] v6MfMZ7x028: Downloading webpage\n[youtube] v6MfMZ7x028: Downloading tv client config\n[youtube] v6MfMZ7x028: Downloading player b559f50c-main\n[youtube] v6MfMZ7x028: Downloading tv player API JSON\n[youtube] v6MfMZ7x028: Downloading web safari client config\n[youtube] v6MfMZ7x028: Downloading web safari player API JSON\n[youtube] v6MfMZ7x028: Downloading mweb client config\n[youtube] v6MfMZ7x028: Downloading mweb player API JSON\n[youtube] [pot:bgutil:http] Generating a gvs PO Token for web_safari client via bgutil HTTP server\n[youtube] [jsc:deno] Solving JS challenges using deno\n[info] v6MfMZ7x028: Downloading 1 format(s): 251\n[download] Sleeping 4.00 seconds as required by the site...\n[download] Destination: -"},
+  "selftest": {"ok":true,"checks":{"yemot_token":{"ok":true,"ms":0,"info":"שלוחה /8 נגישה"},"ext_contents":{"ok":true,"ms":0,"info":"אזהרה: בשלוחה /8 יש 1 קבצים שאינם של הקו (~kavsil.wav). הם לא יימחקו, אבל מומלץ שלוחה ריקה: שנה EXT_PATH"},"gemini":{"ok":true,"ms":0,"info":"1 מפתחות, מודל gemini-3.5-flash"},"youtube_search":{"ok":true,"ms":0,"info":"10 תוצאות, הראשונה: עדן חסון & אופק אדנק & אגם בוחבוט - איך שהיא רוקדת (Prod. By Nuri)"},"pot_provider":{"ok":true,"ms":0,"info":"מאזין"},"cookies":{"ok":true,"ms":0,"info":"נטענו (כולל עוגיית התחברות)"},"ytdlp":{"ok":true,"ms":0,"info":"2026.11.16.232655"},"deno":{"ok":true,"ms":0,"info":"deno 2.9.8 (stable, release, x86_64-unknown-linux-gnu)"},"ffmpeg":{"ok":true,"ms":0,"info":"ffmpeg version 5.1.9-0+deb12u1 Copyright (c) 2000-2026 the FFmpeg developers"},"resources":{"ok":true,"info":"זיכרון בתהליך: 86MB | פנוי במכונה: 6453MB מתוך 7941MB | ליבות: 2"}}}
+}
