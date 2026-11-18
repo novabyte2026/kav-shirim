@@ -45,14 +45,17 @@ const keyList = v => String(v || '').split(',').map(s => s.trim()).filter(Boolea
 const KEYS = keyList(process.env.GEMINI_API_KEYS);
 const GBASE = process.env.GEMINI_BASE || 'https://generativelanguage.googleapis.com/v1beta/models/';
 const STT_MODEL = String(process.env.STT_MODEL || 'gemini-3.5-flash').trim();
-// מודלים חלופיים. ג'מיני מחזיר 503 "high demand" כשהמודל עמוס, וזה קורה
-// באמת - נמדד בייצור. אז מנסים מודל אחר במקום להפיל את השיחה.
-const STT_MODELS = [STT_MODEL].concat(
-  String(process.env.STT_FALLBACKS || 'gemini-2.5-flash,gemini-2.0-flash')
-    .split(',').map(x => x.trim()).filter(Boolean)
-).filter((m, i, a) => m && a.indexOf(m) === i);
+// מודלים חלופיים. ג'מיני מחזיר 503 "high demand" או timeout כשהמודל עמוס,
+// וזה קורה באמת - נמדד בייצור. אז מנסים מודל אחר במקום להפיל את השיחה.
+// את הרשימה לא כותבים ביד: שואלים את גוגל אילו מודלים קיימים היום ובוחרים
+// את החדשים, כדי שהיא לא תתיישן. STT_FALLBACKS גובר אם הוגדר ידנית.
+const STT_FALLBACKS = String(process.env.STT_FALLBACKS || '')
+  .split(',').map(x => x.trim()).filter(Boolean);
 // תקרת זמן לכל התמלול, כולל כל הניסיונות
-const STT_MS = Math.min(120000, Math.max(15000, parseInt(process.env.STT_MS, 10) || 40000));
+const STT_MS = Math.min(120000, Math.max(15000, parseInt(process.env.STT_MS, 10) || 50000));
+// פסק זמן לבקשת תמלול בודדת. קצר בכוונה: אם מודל לא ענה תוך כך הוא עמוס,
+// ועדיף לעבור למודל הבא מאשר לשרוף את כל התקציב על אחד.
+const STT_REQ_MS = Math.min(60000, Math.max(5000, parseInt(process.env.STT_REQ_MS, 10) || 14000));
 
 // הנתיבים של הכלים. ב-Docker הם מוגדרים מפורשות כדי שלא נהיה תלויים ב-PATH.
 const YTDLP = process.env.YTDLP_PATH || 'yt-dlp';
@@ -138,6 +141,40 @@ async function http(url, opt, ms) {
 }
 
 // ---------- ג'מיני: תמלול ההקלטה ----------
+// שולף מרשימת המודלים של גוגל את מודלי ה-flash שתומכים ב-generateContent,
+// החדשים קודם. נקרא פעם אחת ונשמר. אם הקריאה נכשלת - נשארים עם המודל הראשי.
+const verOf = n => { const m = String(n).match(/(\d+(?:\.\d+)?)/); return m ? parseFloat(m[1]) : 0; };
+let modelsP = null;
+function sttModels() {
+  if (modelsP) return modelsP;
+  modelsP = (async () => {
+    const list = [STT_MODEL, ...STT_FALLBACKS].filter((m, i, a) => m && a.indexOf(m) === i);
+    try {
+      const url = GBASE.replace(/\/+$/, '') + '?pageSize=200';
+      const r = await http(url, { headers: { 'x-goog-api-key': KEYS[0] } }, 12000);
+      if (r.ok) {
+        const j = await r.json();
+        const found = (j.models || [])
+          .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+          .map(m => String(m.name || '').replace(/^models\//, ''))
+          // רק flash (מהיר וזול), בלי גרסאות ניסיוניות או ייעודיות שלא מתמללות
+          .filter(n => /flash/i.test(n) &&
+            !/(thinking|image|tts|audio-native|embedding|live|vision)/i.test(n))
+          .sort((a, b) => verOf(b) - verOf(a) || a.length - b.length);
+        for (const n of found) if (!list.includes(n)) list.push(n);
+      } else {
+        console.error('רשימת המודלים: ' + r.status);
+      }
+    } catch (e) {
+      console.error('רשימת המודלים נכשלה: ' + e.message);
+    }
+    const out = list.slice(0, 4);
+    console.log('מודלים לתמלול: ' + out.join(' -> '));
+    return out;
+  })();
+  return modelsP;
+}
+
 let keyRot = 0;
 async function transcribe(buf) {
   if (!KEYS.length) throw new Error('GEMINI_API_KEYS ריק');
@@ -159,8 +196,9 @@ async function transcribe(buf) {
   // שלושה סבבים על כל המודלים ועל כל המפתחות, עד תקרת הזמן.
   // 503 ו-429 הם זמניים ולכן מנסים שוב; 400/404 אומרים שהמודל לא מתאים
   // ולכן עוברים מיד למודל הבא, בלי לבזבז זמן של המתקשר.
+  const models = await sttModels();
   for (let round = 0; round < 3; round++) {
-    for (const model of STT_MODELS) {
+    for (const model of models) {
       for (let k = 0; k < KEYS.length; k++) {
         if (Date.now() - t0 > STT_MS) throw new Error(err + ' (אזל הזמן)');
         const key = KEYS[keyRot++ % KEYS.length];
@@ -170,7 +208,7 @@ async function transcribe(buf) {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
             body: JSON.stringify(body)
-          }, 25000);
+          }, STT_REQ_MS);
 
           if (r.ok) {
             const j = await r.json();
