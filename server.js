@@ -691,4 +691,11 @@ app.listen(PORT, () => {
   console.log('  yt-dlp: ' + YTDLP + ' | ffmpeg: ' + FFMPEG + ' | POT: ' + POT_BASE_URL);
   if (!TOKEN) console.log('  אזהרה: YEMOT_TOKEN לא הוגדר');
   if (!KEYS.length) console.log('  אזהרה: GEMINI_API_KEYS לא הוגדר');
+  // בדיקה בעלייה: האם שלוחת הספרייה קיימת ונגישה. מופיע בלוג של Render,
+  // ולכן רואים מיד אם צריך ליצור אותה בימות - בלי לחכות לשיחה שתיכשל.
+  if (TOKEN) {
+    libList(true)
+      .then(set => console.log('  ספרייה ' + LIBP + ': נגישה, ' + set.size + ' קבצים'))
+      .catch(e => console.error('  ספרייה ' + LIBP + ': לא נגישה! ' + e.message));
+  }
 });
