@@ -4,14 +4,14 @@
 //   1. המתקשר מקליט את שם השיר.
 //   2. ג'מיני מתמלל את ההקלטה.
 //   3. חיפוש ביוטיוב דרך InnerTube (ה-API הפנימי, בלי מפתח ובלי מכסה).
-//   4. yt-dlp מזרים את האודיו ל-stdout, ו-ffmpeg חותך אותו לקטעים של
-//      SEG_SEC שניות בפורמט טלפון (8kHz מונו).
-//   5. כל קטע שמוכן נעלה לשלוחה של ימות, והקטע הראשון מתחיל להתנגן
-//      תוך שניות - בזמן שהשאר עוד זורמים. השיר כולו לא יורד אף פעם.
+//   4. אם השיר כבר בספרייה (LIB_PATH) - הוא מתנגן מיד.
+//   5. אם לא - yt-dlp מוריד אותו, ffmpeg ממיר לפורמט טלפון (8kHz מונו),
+//      והוא נשמר כקובץ אחד בשלוחת הספרייה. משם ימות מנגנת אותו.
 //
-// למה קטעים ולא קובץ אחד: ימות לא יודעת לעצור קובץ באמצע השמעה ולא
-// יודעת להשמיע כתובת אינטרנט. קטעים קצרים נותנים גם התחלה מיידית וגם
-// אפשרות לעצור בהקשה.
+// למה קובץ אחד ולא קטעים: ימות לא יודעת להשמיע כתובת אינטרנט, ולכן
+// הקובץ חייב לשבת אצלה. גרסה קודמת חתכה לקטעים כדי להתחיל מהר, אבל זה
+// יצר רווח של מאות מילישניות בין קטע לקטע ועומס מתמשך על המעבד. עכשיו
+// השיר יורד פעם אחת, נשמר בספרייה, ומשם מתנגן רצוף - וגם מיידי בפעם הבאה.
 
 const express = require('express');
 const crypto = require('crypto');
@@ -80,20 +80,18 @@ function setupCookies() {
 const EXT = (process.env.EXT_PATH || '1').replace(/^\/+|\/+$/g, '');
 const EXTP = '/' + EXT;
 
+// שלוחת הספרייה: כאן נשמרים השירים שהורדו, לצמיתות. שיר שכבר ירד פעם
+// מתנגן מיד בלי להוריד שוב, ואפשר גם להיכנס לשלוחה הזאת ולהאזין למאגר.
+// חייבת להיות שלוחה אחרת מ-EXT_PATH (שם יושבות ההקלטות הזמניות).
+const LIB = (process.env.LIB_PATH || '6').replace(/^\/+|\/+$/g, '');
+const LIBP = '/' + LIB;
+
 const REC_MAX = String(Math.min(30, Math.max(3, parseInt(process.env.REC_MAX, 10) || 10)));
-const SEG_SEC = Math.min(30, Math.max(4, parseInt(process.env.SEG_SEC, 10) || 15));
-// כמה קטעים נותנים לימות בכל סבב.
-// בין קבוצת קטעים לבאה ימות חוזרת לשרת, וזה יוצר רווח של כמה מאות
-// מילישניות. SEG_SEC * CHAIN = כמה שניות מוזיקה בין רווח לרווח, ולכן
-// ככל שהמכפלה גדולה יותר כך יש פחות רווחים. הקשה עוצרת מיד בכל מקרה
-// (ימות קוטעת את ההשמעה), ולכן שרשרת ארוכה לא פוגעת בתגובה להקשה.
-// ברירת המחדל: 15 * 4 = דקה של מוזיקה רצופה בין רווח לרווח.
-const CHAIN = Math.min(8, Math.max(1, parseInt(process.env.CHAIN, 10) || 4));
 const MAX_SEC = Math.min(1800, Math.max(60, (parseInt(process.env.SONG_MAX_MIN, 10) || 10) * 60));
-// עד כמה קטעים מעלים מראש לפני מקום ההשמעה. מונע העלאת שיר שלם שידלגו עליו.
-// כמה קטעים מראש. נמוך = פחות זיכרון ופחות העלאות במקביל על מכונה חלשה.
-const LOOKAHEAD = Math.min(40, Math.max(2, parseInt(process.env.LOOKAHEAD, 10) || 3));
-const PREP_MS = Math.min(180000, Math.max(10000, parseInt(process.env.PREP_MS, 10) || 75000));
+// הורדת שיר שלם לוקחת יותר זמן מקטע בודד, ולכן ההמתנה ארוכה יותר
+const PREP_MS = Math.min(600000, Math.max(10000, parseInt(process.env.PREP_MS, 10) || 300000));
+// תקרת זמן להורדה + המרה + העלאה של שיר שלם
+const DL_MS = Math.min(600000, Math.max(30000, parseInt(process.env.DL_MS, 10) || 240000));
 
 // שיפור השמע לטלפון. קו טלפון הוא 8kHz, ומוזיקה נשמעת בו חלשה ועמומה
 // כי יש לה טווח דינמי רחב. dynaudnorm מיישר את עוצמת הקול כך שגם
@@ -310,92 +308,67 @@ function ytdlpArgs(url) {
   ];
 }
 
-// מפעיל את הצינור ומחזיר מיד. s.segs מתמלא ברקע.
-function startStream(s, videoId) {
-  s.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kav-'));
-  s.base = 'k' + s.e + 'x';
-  s.segs = [];
-  s.idx = 0;
-  s.ffDone = false;
-  s.pumpDone = false;
-  s.stopped = false;
-  // שיר חדש באותה שיחה: מאפסים את דגל הניקוי, אחרת הקטעים של השיר הזה
-  // לא יימחקו מימות בסוף השיחה (cleanup רץ פעם אחת בלבד).
-  s.cleaned = false;
-  s.played = null;
+// ---------- ספריית השירים ----------
+// שם קובץ קבוע לכל סרטון, כדי שנדע אם הוא כבר אצלנו. אותיות וספרות בלבד.
+const songName = id => 'g' + crypto.createHash('md5').update(String(id)).digest('hex').slice(0, 14);
 
-  const url = 'https://www.youtube.com/watch?v=' + videoId;
-  const dl = spawn(YTDLP, ytdlpArgs(url), { stdio: ['ignore', 'pipe', 'pipe'] });
-  const ff = spawn(FFMPEG, [
-    '-y', '-v', 'error',
-    '-i', 'pipe:0',
-    '-vn', '-t', String(MAX_SEC),
-    ...(AUDIO_FILTER ? ['-af', AUDIO_FILTER] : []),
-    '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le',
-    '-f', 'segment', '-segment_time', String(SEG_SEC), '-reset_timestamps', '1',
-    path.join(s.dir, 'p%05d.wav')
-  ], { stdio: ['pipe', 'ignore', 'pipe'] });
-
-  s.procs = [dl, ff];
-  let dlErr = '', ffErr = '';
-  dl.stderr.on('data', d => { dlErr += d.toString(); });
-  ff.stderr.on('data', d => { ffErr += d.toString(); });
-  dl.stdout.pipe(ff.stdin);
-  // המתקשר עצר באמצע: ffmpeg נסגר, ו-yt-dlp ממשיך לכתוב לצינור שבור
-  dl.stdout.on('error', () => {});
-  ff.stdin.on('error', () => {});
-  dl.on('error', e => { dlErr += ' ' + e.message; });
-  ff.on('error', e => { ffErr += ' ' + e.message; });
-
-  ff.on('close', () => {
-    s.ffDone = true;
-    // השגיאה האמיתית של yt-dlp יושבת בסוף הפלט, לכן לוקחים את הזנב ולא את הראש
-    if (dlErr.trim()) console.error('yt-dlp:', dlErr.trim().slice(-1500));
-    if (ffErr.trim()) console.error('ffmpeg:', ffErr.trim().slice(-400));
-  });
-
-  s.pump = pump(s).catch(e => { console.error('העלאת קטעים נכשלה:', e.message); s.pumpDone = true; });
-  return s;
+// רשימת הקבצים שבשלוחת הספרייה, עם מטמון של דקה כדי לא להציף את ימות
+let libCache = { t: 0, set: new Set() };
+async function libList(force) {
+  if (!force && libCache.t && Date.now() - libCache.t < 60000) return libCache.set;
+  const r = await http(YM + 'GetIVR2Dir?token=' + enc(TOKEN) + '&path=' + enc('ivr2:' + LIBP), {}, 12000);
+  const j = await r.json().catch(() => ({}));
+  if (j.responseStatus !== 'OK') throw new Error('קריאת שלוחת הספרייה נכשלה ' + JSON.stringify(j).slice(0, 140));
+  const set = new Set();
+  for (const f of (j.files || [])) if (f && f.name) set.add(String(f.name).replace(/\.[^.]+$/, ''));
+  libCache = { t: Date.now(), set };
+  return set;
 }
 
-// קטע שלם רק כשהבא אחריו נפתח (או כש-ffmpeg סיים). מעלים בסדר.
-async function pump(s) {
-  let k = 0;
-  for (;;) {
-    if (s.stopped) break;
-    const cur = path.join(s.dir, 'p' + pad(k) + '.wav');
-    const next = path.join(s.dir, 'p' + pad(k + 1) + '.wav');
-    const haveCur = fs.existsSync(cur);
-    if (haveCur && (fs.existsSync(next) || s.ffDone)) {
-      // לא רצים רחוק מדי לפני ההשמעה
-      while (!s.stopped && s.segs.length - s.idx > LOOKAHEAD) await sleep(400);
-      if (s.stopped) break;
-      const name = s.base + pad(k);
-      const buf = fs.readFileSync(cur);
-      fs.rm(cur, { force: true }, () => {});
-      // קטע זעיר בסוף (שבריר שנייה) רק יישמע כנקישה
-      if (buf.length > 4000) {
-        await upload(name, buf, 25000);
-        s.segs.push(name);
-      }
-      k++;
-      continue;
+// מוריד שיר שלם, ממיר לפורמט טלפון ומעלה אותו לספרייה כקובץ אחד.
+// זה החלק הארוך, והוא קורה פעם אחת בלבד לכל שיר. מכאן והלאה השיר מיידי.
+async function fetchSong(videoId, name) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kav-'));
+  const out = path.join(dir, 'song.wav');
+  const t0 = Date.now();
+  try {
+    const dl = spawn(YTDLP, ytdlpArgs('https://www.youtube.com/watch?v=' + videoId), { stdio: ['ignore', 'pipe', 'pipe'] });
+    const ff = spawn(FFMPEG, ['-y', '-v', 'error', '-i', 'pipe:0', '-vn', '-t', String(MAX_SEC),
+      ...(AUDIO_FILTER ? ['-af', AUDIO_FILTER] : []),
+      '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', out], { stdio: ['pipe', 'ignore', 'pipe'] });
+    let err = '';
+    dl.stderr.on('data', d => { err += d.toString(); });
+    ff.stderr.on('data', d => { err += d.toString(); });
+    dl.stdout.pipe(ff.stdin);
+    dl.stdout.on('error', () => {});
+    ff.stdin.on('error', () => {});
+    dl.on('error', e => { err += ' ' + e.message; });
+    ff.on('error', e => { err += ' ' + e.message; });
+
+    const code = await new Promise(done => {
+      const timer = setTimeout(() => { try { dl.kill('SIGKILL'); ff.kill('SIGKILL'); } catch (e) {} done(-1); }, DL_MS);
+      ff.on('close', c => { clearTimeout(timer); done(c); });
+    });
+    try { dl.kill('SIGKILL'); } catch (e) {}
+
+    const size = fs.existsSync(out) ? fs.statSync(out).size : 0;
+    if (code !== 0 || size < 20000) {
+      throw new Error('החילוץ נכשל (קוד ' + code + ', ' + size + ' בתים) ' + err.trim().slice(-400));
     }
-    if (s.ffDone && !haveCur) break;
-    await sleep(250);
+    // העלאה אחת של השיר כולו. גדול בהרבה מקטע, ולכן תקרת זמן נדיבה.
+    await upload(name, fs.readFileSync(out), 180000);
+    libCache.set.add(name);
+    console.log('נשמר בספרייה:', name, Math.round(size / 1024) + 'KB', (Date.now() - t0) + 'ms');
+  } finally {
+    fs.rm(dir, { recursive: true, force: true }, () => {});
   }
-  s.pumpDone = true;
 }
 
-// ניקוי: הורג תהליכים, מוחק קטעים מימות ומוחק את התיקייה הזמנית
+// ניקוי שיחה. שירים בספרייה לעולם לא נמחקים - רק ההקלטה הזמנית של שם השיר.
 function cleanup(s) {
   if (!s || s.cleaned) return;
   s.cleaned = true;
-  s.stopped = true;
-  for (const p of s.procs || []) { try { p.kill('SIGKILL'); } catch (e) {} }
-  for (const n of s.segs || []) del(n);
-  if (s.rec) del(s.rec);
-  if (s.dir) fs.rm(s.dir, { recursive: true, force: true }, () => {});
+  if (s.rec) { del(s.rec); s.rec = null; }
 }
 
 // ---------- מצב השיחות ----------
@@ -437,7 +410,7 @@ const ERR = sp('הייתה תקלה. אמור את שם השיר שוב ובסי
 const DONE = sp('השיר נגמר. לשיר נוסף אמור את שמו ובסיום הקש סולמית');
 const STOPPED = sp('עצרתי. לשיר נוסף אמור את שמו ובסיום הקש סולמית');
 
-// ---------- הכנת שיר: תמלול, חיפוש, התחלת הזרמה ----------
+// ---------- הכנת שיר: תמלול, חיפוש, ואם צריך הורדה לספרייה ----------
 async function prepare(s) {
   const buf = await download(s.rec);
   del(s.rec);
@@ -450,17 +423,24 @@ async function prepare(s) {
   const items = await ytSearch(said);
   if (!items.length) return { ask: NOTFOUND };
 
-  s.results = items;
-  s.pick = 0;
-  startStream(s, items[0].id);
-  return { track: items[0] };
+  const track = items[0];
+  const name = songName(track.id);
+
+  // כבר בספרייה? מתנגן מיד, בלי הורדה ובלי עומס על המעבד
+  let have = false;
+  try { have = (await libList(false)).has(name); }
+  catch (e) { console.error('בדיקת הספרייה נכשלה:', e.message); }
+
+  if (!have) await fetchSong(track.id, name);
+  console.log((have ? 'מהספרייה: ' : 'הורד: ') + track.title);
+  return { track, name, cached: have };
 }
 
 // ---------- הזרימה של הסבבים ----------
 async function step(s, q) {
   const key = digitsOf(q[s.p]);
 
-  // מחכים שההכנה תסתיים
+  // מחכים שההכנה תסתיים (תמלול, חיפוש, ואם צריך הורדה מלאה)
   if (s.stage === 'wait') {
     const r = await Promise.race([s.job, sleep(7000).then(() => null)]);
     if (r === null) {
@@ -470,29 +450,15 @@ async function step(s, q) {
     }
     s.job = null;
     if (r.ask) return askSong(s, 't-' + r.ask);
-    s.stage = 'play';
-    // מכריזים את מה שנמצא, ומיד אחר כך מתחיל השיר
-    return chain(s, ['t-' + sp('מנגן ' + r.track.title)], 'A');
+    // השיר כולו יושב כקובץ אחד בספרייה. מכריזים ומנגנים אותו ברצף -
+    // בלי רווחים באמצע, כי ימות מנגנת מהאחסון שלה ולא מהשרת.
+    s.stage = 'ended';
+    return chain(s, ['t-' + sp('מנגן ' + r.track.title), 'f-' + LIBP + '/' + r.name], 'A');
   }
 
-  // השמעה
-  if (s.stage === 'play') {
-    if (key) { cleanup(s); s.segs = []; s.idx = 0; return askSong(s, 't-' + STOPPED); }
-
-    const ready = s.segs.length - s.idx;
-    if (ready <= 0) {
-      if (s.pumpDone) { cleanup(s); s.segs = []; s.idx = 0; return askSong(s, 't-' + DONE); }
-      return chain(s, [(await ensureSilence()) ? 'f-' + EXTP + '/' + SIL : 't- '], 'S');
-    }
-    const msgs = [];
-    for (let k = 0; k < CHAIN && s.idx < s.segs.length; k++) {
-      const name = s.segs[s.idx++];
-      msgs.push('f-' + EXTP + '/' + name);
-      // קטע שהושמע כבר לא נחוץ. מוחקים אותו אחרי שהושמע, בפיגור של סבב.
-      if (s.played) del(s.played);
-      s.played = name;
-    }
-    return chain(s, msgs, 'P');
+  // השיר הסתיים, או שהמתקשר הקיש באמצע ועצר אותו
+  if (s.stage === 'ended') {
+    return askSong(s, 't-' + (key ? STOPPED : DONE));
   }
 
   // קיבלנו את ההקלטה: מתחילים להכין ברקע ומודיעים למתקשר
@@ -524,7 +490,7 @@ app.all('/yemot', async (req, res) => {
     }
     let s = calls[id];
     if (!s) {
-      s = calls[id] = { e: crypto.randomBytes(3).toString('hex'), n: 0, t: Date.now(), stage: '', segs: [], idx: 0 };
+      s = calls[id] = { e: crypto.randomBytes(3).toString('hex'), n: 0, t: Date.now(), stage: '' };
       ensureSilence();
       return res.send(askSong(s, 't-' + GREET));
     }
@@ -573,6 +539,13 @@ app.get('/selftest', async (req, res) => {
         '). הם לא יימחקו, אבל מומלץ שלוחה ריקה: שנה EXT_PATH';
     }
     return 'שלוחה ' + EXTP + ' ריקה ופנויה' + (mine.length ? ' (' + mine.length + ' קבצים שלנו)' : '');
+  });
+  // הספרייה: בלעדיה אין איפה לשמור את השירים
+  await t('library', async () => {
+    if (!TOKEN) throw new Error('YEMOT_TOKEN ריק');
+    if (LIB === EXT) throw new Error('LIB_PATH חייבת להיות שלוחה אחרת מ-EXT_PATH (' + EXTP + ')');
+    const set = await libList(true);
+    return 'שלוחה ' + LIBP + ' נגישה, ' + set.size + ' שירים בספרייה';
   });
   await t('gemini', async () => {
     if (!KEYS.length) throw new Error('GEMINI_API_KEYS ריק');
@@ -669,7 +642,7 @@ app.get('/trystream', async (req, res) => {
 setupCookies();
 app.listen(PORT, () => {
   console.log('קו שירים AI מאזין על פורט ' + PORT);
-  console.log('  שלוחת קבצים: ' + EXTP + ' | קטע: ' + SEG_SEC + 'ש | שרשרת: ' + CHAIN);
+  console.log('  שלוחת הקלטות: ' + EXTP + ' | שלוחת ספרייה: ' + LIBP);
   console.log('  yt-dlp: ' + YTDLP + ' | ffmpeg: ' + FFMPEG + ' | POT: ' + POT_BASE_URL);
   if (!TOKEN) console.log('  אזהרה: YEMOT_TOKEN לא הוגדר');
   if (!KEYS.length) console.log('  אזהרה: GEMINI_API_KEYS לא הוגדר');

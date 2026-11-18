@@ -13,11 +13,10 @@ services:
     envVars:
       - key: EXT_PATH
         value: "8"
-      # קטעים ארוכים יותר = פחות סבבים = פחות עבודה ל-0.1 CPU
-      - key: SEG_SEC
-        value: "20"
-      - key: CHAIN
-        value: "3"
+      # שלוחת הספרייה: כאן נשמרים השירים שהורדו, לצמיתות.
+      # חייבת להיות שלוחה אחרת מ-EXT_PATH.
+      - key: LIB_PATH
+        value: "6"
       # הסודות נכנסים ידנית בלוח הבקרה של Render, לא בקובץ הזה
       - key: YEMOT_TOKEN
         sync: false
