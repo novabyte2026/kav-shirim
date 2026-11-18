@@ -45,6 +45,14 @@ const keyList = v => String(v || '').split(',').map(s => s.trim()).filter(Boolea
 const KEYS = keyList(process.env.GEMINI_API_KEYS);
 const GBASE = process.env.GEMINI_BASE || 'https://generativelanguage.googleapis.com/v1beta/models/';
 const STT_MODEL = String(process.env.STT_MODEL || 'gemini-3.5-flash').trim();
+// מודלים חלופיים. ג'מיני מחזיר 503 "high demand" כשהמודל עמוס, וזה קורה
+// באמת - נמדד בייצור. אז מנסים מודל אחר במקום להפיל את השיחה.
+const STT_MODELS = [STT_MODEL].concat(
+  String(process.env.STT_FALLBACKS || 'gemini-2.5-flash,gemini-2.0-flash')
+    .split(',').map(x => x.trim()).filter(Boolean)
+).filter((m, i, a) => m && a.indexOf(m) === i);
+// תקרת זמן לכל התמלול, כולל כל הניסיונות
+const STT_MS = Math.min(120000, Math.max(15000, parseInt(process.env.STT_MS, 10) || 40000));
 
 // הנתיבים של הכלים. ב-Docker הם מוגדרים מפורשות כדי שלא נהיה תלויים ב-PATH.
 const YTDLP = process.env.YTDLP_PATH || 'yt-dlp';
@@ -143,28 +151,51 @@ async function transcribe(buf) {
     }],
     generationConfig: { temperature: 0, maxOutputTokens: 120 }
   };
+
+  const t0 = Date.now();
   let err = 'תמלול נכשל';
-  for (let i = 0; i < KEYS.length + 1; i++) {
-    const key = KEYS[keyRot++ % KEYS.length];
-    try {
-      const r = await http(GBASE + STT_MODEL + ':generateContent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-        body: JSON.stringify(body)
-      }, 25000);
-      if (r.ok) {
-        const j = await r.json();
-        const t = (((j.candidates || [])[0] || {}).content || {}).parts || [];
-        const text = t.map(p => p.text || '').join('').trim();
-        if (text && text !== 'ריק') return text;
-        return '';
+  let tries = 0;
+
+  // שלושה סבבים על כל המודלים ועל כל המפתחות, עד תקרת הזמן.
+  // 503 ו-429 הם זמניים ולכן מנסים שוב; 400/404 אומרים שהמודל לא מתאים
+  // ולכן עוברים מיד למודל הבא, בלי לבזבז זמן של המתקשר.
+  for (let round = 0; round < 3; round++) {
+    for (const model of STT_MODELS) {
+      for (let k = 0; k < KEYS.length; k++) {
+        if (Date.now() - t0 > STT_MS) throw new Error(err + ' (אזל הזמן)');
+        const key = KEYS[keyRot++ % KEYS.length];
+        tries++;
+        try {
+          const r = await http(GBASE + model + ':generateContent', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+            body: JSON.stringify(body)
+          }, 25000);
+
+          if (r.ok) {
+            const j = await r.json();
+            const t = (((j.candidates || [])[0] || {}).content || {}).parts || [];
+            const text = t.map(p => p.text || '').join('').trim();
+            if (tries > 1) console.log('תמלול הצליח אחרי ' + tries + ' ניסיונות, מודל ' + model);
+            if (text && text !== 'ריק') return text;
+            return '';
+          }
+
+          const detail = (await r.text()).slice(0, 140).replace(/\s+/g, ' ');
+          err = 'ג׳מיני ' + model + ' ' + r.status + ' ' + detail;
+          console.error('תמלול: ' + err);
+          // המודל לא קיים או הבקשה פסולה: אין טעם לחזור עליו
+          if (r.status === 400 || r.status === 404) break;
+          // מפתח פסול או חסום: שאר השגיאות שאינן זמניות
+          if (![429, 500, 502, 503, 504].includes(r.status)) break;
+        } catch (e) {
+          err = 'ג׳מיני ' + model + ' ' + (e.name === 'TimeoutError' ? 'timeout' : e.message);
+          console.error('תמלול: ' + err);
+        }
+        // המתנה גדלה, עד 4 שניות
+        await sleep(Math.min(4000, 500 * tries));
       }
-      err = 'ג׳מיני ' + r.status + ' ' + (await r.text()).slice(0, 160);
-      if (![429, 500, 502, 503, 504].includes(r.status)) break;
-    } catch (e) {
-      err = 'ג׳מיני ' + (e.name === 'TimeoutError' ? 'timeout' : e.message);
     }
-    await sleep(400 * (i + 1));
   }
   throw new Error(err);
 }
