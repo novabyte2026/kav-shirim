@@ -23,6 +23,20 @@ const { spawn } = require('child_process');
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 
+// רישום כל בקשה נכנסת. זה מה שמאפשר לראות בלוג של Render אם ימות בכלל
+// הגיעה לשרת, במקום לנחש. ApiCallId מזהה שיחה, ApiPhone הוא המתקשר.
+app.use((req, res, next) => {
+  const t0 = Date.now();
+  const q = { ...req.query, ...req.body };
+  const who = q.ApiCallId ? ' call=' + String(q.ApiCallId).slice(-10) : '';
+  console.log('>> נכנס ' + req.method + ' ' + req.path + who);
+  res.on('finish', () => {
+    console.log('<< יצא  ' + req.method + ' ' + req.path + ' -> ' + res.statusCode +
+      ' (' + (Date.now() - t0) + 'ms)');
+  });
+  next();
+});
+
 // ---------- הגדרות ----------
 const TOKEN = process.env.YEMOT_TOKEN || '';
 const YM = process.env.YEMOT_BASE || 'https://www.call2all.co.il/ym/api/';
