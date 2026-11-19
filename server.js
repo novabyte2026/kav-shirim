@@ -56,19 +56,21 @@ const FFMPEG = env.FFMPEG_PATH || 'ffmpeg';
 const POT = env.POT_BASE_URL === undefined ? 'http://127.0.0.1:4416' : String(env.POT_BASE_URL).trim();
 const YT_CLIENTS = env.YT_CLIENTS || 'tv,web_safari,mweb';
 const YT_FORMAT = env.YT_FORMAT || 'bestaudio[abr<=100]/bestaudio/18/best';
-// עיבוד שמע לטלפון. רץ אחרי ההמרה ל-8kHz מונו, ולכן זול גם על 0.1 מעבד.
-//   highpass/lowpass: חותכים מה שהקו הטלפוני ממילא לא מעביר (בס עמוק, גבוהים
-//     מעל 3.6kHz) כדי שהעוצמה תלך לתחום שנשמע.
-//   equalizer 2.5kHz +5dB: חידוד - מבליט קולות וכלים, פחות "עמום".
-//   acompressor: מצמצם את ההפרש בין חלקים שקטים לרועשים, ו-makeup מגביר.
-//   alimiter: מונע עיוות, ומיישר את הכול לעוצמה גבוהה אחידה.
-// AUDIO_FILTER=off מכבה, וכל ערך אחר מחליף את השרשרת.
-const AUDIO_DEFAULT = 'aresample=8000,aformat=channel_layouts=mono,highpass=f=140,lowpass=f=3600,' +
-  'equalizer=f=2500:t=q:w=1:g=5,acompressor=threshold=0.06:ratio=4:attack=5:release=150:makeup=3,' +
-  'alimiter=limit=0.9:level=enabled';
-const AUDIO_FILTER = env.AUDIO_FILTER === 'off' ? '' : String(env.AUDIO_FILTER || AUDIO_DEFAULT).trim();
-// גרסת העיבוד. שירים שעובדו בגרסה ישנה יותר מעובדים מחדש ברקע (AUDIO_UPGRADE=0 מכבה)
-const AUDIO_VER = AUDIO_FILTER ? 2 : 1;
+// עיבוד שמע לטלפון, בשלושה שלבים זולים על קובץ 8kHz מונו:
+//   1. מדידה: כמה חזק השיר (אחרי ה-EQ).
+//   2. הגברה קבועה לכל השיר עד עוצמת יעד - בלי "שאיבה". הגרסה הקודמת השתמשה
+//      ב-limiter אוטומטי שהנמיך את כל המוזיקה בכל מכה ומיד העלה, וזה נשמע
+//      כמו קטיעות (19.11.2026). אסור לחזור לזה.
+//   3. דחיסה עדינה ו-limiter איטי שרק תופס שיאים, נגד עיוות.
+// ה-EQ: חיתוך מה שקו טלפון לא מעביר (מתחת 120Hz, מעל 3.6kHz) וחידוד קל ב-2.5kHz.
+// AUDIO_FILTER=off מכבה. AUDIO_TARGET = עוצמת יעד ממוצעת ב-dB (ברירת מחדל -15).
+const AUDIO_EQ = env.AUDIO_EQ || 'highpass=f=120,lowpass=f=3600,equalizer=f=2500:t=q:w=1.2:g=3';
+const AUDIO_DYN = env.AUDIO_DYN || 'acompressor=threshold=0.3:ratio=2:attack=20:release=400:makeup=1,alimiter=limit=0.95:attack=5:release=300:level=disabled';
+const AUDIO_ON = env.AUDIO_FILTER !== 'off';
+const AUDIO_TARGET = Math.min(-8, Math.max(-30, parseFloat(env.AUDIO_TARGET) || -15));
+// גרסת העיבוד. שירים שעובדו בגרסה אחרת מעובדים מחדש ברקע (AUDIO_UPGRADE=0 מכבה)
+const AUDIO_VER = AUDIO_ON ? 3 : 1;
+const AUDIO_FILTER = AUDIO_ON;   // לתאימות עם שאר הקוד: "האם מעבדים"
 
 const REC_MAX = int(env.REC_MAX, 10, 3, 30);
 const MAX_SEC = int(env.SONG_MAX_MIN, 12, 1, 30) * 60;
@@ -742,36 +744,63 @@ const media = {
     });
   },
   async convert(src, out) {
-    const once = filter => run(FFMPEG, ['-y', '-v', 'error', '-i', src, '-vn', '-t', String(MAX_SEC),
-      ...(filter ? ['-af', filter] : []),
-      '-ac', '1', '-ar', '8000', '-c:a', 'pcm_s16le', out], DL_MS);
-    const sizeOf = () => (fs.existsSync(out) ? fs.statSync(out).size : 0);
-    let r = await once(AUDIO_FILTER);
-    // אם שרשרת העיבוד נכשלת - לא מוותרים על השיר, ממירים בלי עיבוד
-    if ((r.code !== 0 || sizeOf() < 16000) && AUDIO_FILTER) {
-      log('עיבוד שמע נכשל, ממיר בלי עיבוד:', short(r.err, 200));
-      r = await once('');
+    const sizeOf = f => (fs.existsSync(f) ? fs.statSync(f).size : 0);
+    const raw = out.replace(/\.wav$/, '') + '.raw.wav';
+    // שלב 0: המרה ל-8kHz מונו. זה השלב היחיד שמפענח את המקור (היקר).
+    const r0 = await run(FFMPEG, ['-y', '-v', 'error', '-i', src, '-vn', '-t', String(MAX_SEC),
+      '-ac', '1', '-ar', '8000', '-c:a', 'pcm_s16le', raw], DL_MS);
+    if (r0.code !== 0 || sizeOf(raw) < 16000) throw new Error('המרה נכשלה (קוד ' + r0.code + ') ' + short(r0.err, 300));
+    let how = 'בלי עיבוד';
+    if (AUDIO_ON) {
+      try { how = await media.process(raw, out); }
+      catch (e) { log('עיבוד שמע נכשל, נשמר בלי עיבוד:', e.message); }
     }
-    const size = sizeOf();
-    if (r.code !== 0 || size < 16000) throw new Error('המרה נכשלה (קוד ' + r.code + ') ' + short(r.err, 300));
-    return size;
+    if (sizeOf(out) < 16000) fs.copyFileSync(raw, out);
+    try { fs.unlinkSync(raw); } catch (e) {}
+    const gaps = await countGaps(out).catch(() => null);
+    log('שמע:', how + (gaps == null ? '' : ', שקטים באמצע השיר: ' + gaps));
+    return sizeOf(out);
+  },
+  // מדידה + הגברה קבועה + דחיסה עדינה. מחזיר תיאור למעקב בלוג.
+  async process(raw, out) {
+    const m = await run(FFMPEG, ['-hide_banner', '-i', raw, '-af', AUDIO_EQ + ',volumedetect', '-f', 'null', '-'], 120000);
+    const mean = parseFloat((m.err.match(/mean_volume:\s*(-?[\d.]+)/) || [])[1]);
+    const peak = parseFloat((m.err.match(/max_volume:\s*(-?[\d.]+)/) || [])[1]);
+    if (m.code !== 0 || isNaN(mean)) throw new Error('מדידה נכשלה: ' + short(m.err, 200));
+    const gain = Math.round(Math.min(20, Math.max(-6, AUDIO_TARGET - mean)) * 10) / 10;
+    const r = await run(FFMPEG, ['-y', '-v', 'error', '-i', raw,
+      '-af', AUDIO_EQ + ',volume=' + gain + 'dB,' + AUDIO_DYN, '-c:a', 'pcm_s16le', out], DL_MS);
+    if (r.code !== 0) throw new Error('עיבוד נכשל: ' + short(r.err, 200));
+    return 'עוצמה ' + mean + 'dB (שיא ' + peak + ') + ' + gain + 'dB';
   }
 };
 
-// בדיקת העיבוד בלי יוטיוב: טון מסונתז, לפני ואחרי. מראה בלוג שהשרשרת תקינה
-// ובכמה היא מגבירה.
+// סופר שקטים של רבע שנייה ומעלה באמצע השיר (לא בהתחלה ולא בסוף). אם יש
+// "קטיעות" בקובץ עצמו - זה יופיע כאן; אם 0 - הבעיה בקו ולא בקובץ.
+async function countGaps(file) {
+  const r = await run(FFMPEG, ['-hide_banner', '-i', file, '-af', 'silencedetect=noise=-45dB:d=0.25', '-f', 'null', '-'], 60000);
+  const starts = [...r.err.matchAll(/silence_start:\s*([\d.]+)/g)].map(x => parseFloat(x[1]));
+  const dur = parseFloat((r.err.match(/time=(\d+):(\d+):([\d.]+)/g) || []).pop()?.replace(/time=/, '').split(':').reduce((a, x) => a * 60 + parseFloat(x), 0)) || 0;
+  return starts.filter(t => t > 2 && (!dur || t < dur - 3)).length;
+}
+
+// בדיקת העיבוד בלי יוטיוב: מוזיקה מסונתזת (טון עם עוצמה משתנה), דרך אותו
+// מסלול בדיוק כמו שיר אמיתי. מראה בלוג שהעיבוד תקין, בכמה הוא מגביר,
+// ושלא נוצרים בו שקטים.
 async function audioSelfTest() {
-  if (!AUDIO_FILTER) return 'עיבוד שמע כבוי';
-  const meas = async filter => {
-    const r = await run(FFMPEG, ['-hide_banner', '-f', 'lavfi', '-i', 'sine=frequency=800:duration=4,volume=0.3',
-      '-af', (filter ? filter + ',' : '') + 'volumedetect', '-f', 'null', '-'], 30000);
-    const m = r.err.match(/mean_volume:\s*(-?[\d.]+)/);
-    if (r.code !== 0 || !m) throw new Error('השרשרת נכשלה: ' + short(r.err.split('\n').filter(l => /rror|nvalid/.test(l)).join(' ') || r.err, 200));
-    return parseFloat(m[1]);
-  };
-  const before = await meas('aresample=8000');
-  const after = await meas(AUDIO_FILTER);
-  return 'תקין: עוצמה ממוצעת ' + before + 'dB -> ' + after + 'dB';
+  if (!AUDIO_ON) return 'עיבוד שמע כבוי';
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kavaud-'));
+  try {
+    const src = path.join(dir, 'src.wav');
+    await run(FFMPEG, ['-y', '-v', 'error', '-f', 'lavfi', '-i',
+      'sine=frequency=440:duration=8,volume=\'0.05+0.04*sin(2*PI*t*2)\':eval=frame', src], 30000);
+    const raw = path.join(dir, 'song.raw.wav');
+    await run(FFMPEG, ['-y', '-v', 'error', '-i', src, '-ac', '1', '-ar', '8000', '-c:a', 'pcm_s16le', raw], 30000);
+    const how = await media.process(raw, path.join(dir, 'song.wav'));
+    const gaps = await countGaps(path.join(dir, 'song.wav'));
+    if (gaps) throw new Error('העיבוד יצר ' + gaps + ' שקטים: ' + how);
+    return 'תקין: ' + how + ', בלי שקטים';
+  } finally { fs.rm(dir, { recursive: true, force: true }, () => {}); }
 }
 
 // ======================================================================
