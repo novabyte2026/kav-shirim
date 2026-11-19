@@ -340,6 +340,7 @@ function setupCookies() {
     const login = /__Secure-3PSID|__Secure-1PSID|\tSID\t/.test(body);
     cookieInfo = lines.length + ' עוגיות' + (login ? ', כולל התחברות' : ', בלי עוגיית התחברות!');
     cookieEnvHash = sha(raw);
+    cookieEnvText = header + body + '\n';
     cookieSaved = sha(fs.readFileSync(COOKIE_FILE, 'utf8'));
   } catch (e) {
     COOKIE_FILE = '';
@@ -354,6 +355,9 @@ function setupCookies() {
 const sha = s => crypto.createHash('sha1').update(String(s)).digest('hex');
 const COOKIE_STORE = 'kavcookies.txt';
 let cookieEnvHash = '', cookieSaved = '', cookieStore = 'לא נבדק';
+// העותק השמור הוא גיבוי בלבד: קודם תמיד העוגיות שב-Render, ורק אם יוטיוב
+// חוסמת אותן מנסים את העותק (ראו tryWays). כך עותק פגום לא יכול להפיל את הקו.
+let cookieEnvText = '', cookieAlt = null, cookieActive = 'env', altFailAt = 0;
 async function cookiesFromStore() {
   if (!COOKIE_FILE || !TOKEN) return (cookieStore = 'אין');
   try {
@@ -361,10 +365,18 @@ async function cookiesFromStore() {
     if (!txt) return (cookieStore = 'אין עותק שמור עדיין');
     const j = JSON.parse(txt);
     if (j.h !== cookieEnvHash) return (cookieStore = 'ב-Render יש עוגיות חדשות, הן בשימוש');
-    fs.writeFileSync(COOKIE_FILE, j.c);
-    cookieSaved = sha(j.c);
-    return (cookieStore = 'נטען עותק מעודכן מ-' + new Date(j.t * 1000).toISOString().slice(0, 16));
+    cookieAlt = j.c;
+    return (cookieStore = 'יש עותק גיבוי מ-' + new Date(j.t * 1000).toISOString().slice(0, 16));
   } catch (e) { return (cookieStore = 'קריאת העותק נכשלה: ' + e.message); }
+}
+// מחליף בין העוגיות של Render לעותק השמור. מחזיר false אם אין למה להחליף.
+function cookiesSwap() {
+  if (!COOKIE_FILE || !cookieAlt || !cookieEnvText) return false;
+  if (Date.now() - altFailAt < 30 * 60000) return false;  // שתיהן נכשלו לאחרונה
+  cookieActive = cookieActive === 'env' ? 'store' : 'env';
+  fs.writeFileSync(COOKIE_FILE, cookieActive === 'env' ? cookieEnvText : cookieAlt);
+  log('עוגיות: עוברים ל' + (cookieActive === 'env' ? 'עוגיות של Render' : 'עותק השמור בימות'));
+  return true;
 }
 async function cookiesPersist() {
   if (!COOKIE_FILE || !TOKEN) return;
@@ -456,7 +468,9 @@ async function geminiOnce(model, key, audioB64) {
   }, STT_REQ_MS);
   if (!r.ok) {
     const body = short(await r.text(), 300);
-    if (r.status === 400 && /thinking/i.test(body) && !noThink.has(model)) {
+    // 400 כשנשלחה הגדרת thinking: חלק מהמודלים דוחים אותה ("invalid argument"
+    // בלי לפרט). מנסים שוב בלעדיה, ומאז לא שולחים אותה למודל הזה.
+    if (r.status === 400 && gen.thinkingConfig && !noThink.has(model)) {
       noThink.add(model);
       return geminiOnce(model, key, audioB64);
     }
@@ -630,6 +644,21 @@ function wayOrder() {
 }
 
 async function tryWays(label, argsFor, okFn) {
+  try { return await tryWaysOnce(label, argsFor, okFn); }
+  catch (e) {
+    // חסימת בוט עם העוגיות הנוכחיות: מנסים פעם אחת את הסט השני (Render / עותק)
+    if (e.kind !== 'bot' || !cookiesSwap()) throw e;
+    try { return await tryWaysOnce(label, argsFor, okFn); }
+    catch (e2) {
+      // שתיהן חסומות: חוזרים לעוגיות של Render ולא מנסים שוב חצי שעה
+      altFailAt = Date.now();
+      if (cookieActive !== 'env') { cookieActive = 'env'; fs.writeFileSync(COOKIE_FILE, cookieEnvText); }
+      throw e2;
+    }
+  }
+}
+
+async function tryWaysOnce(label, argsFor, okFn) {
   let last = '';
   for (const w of wayOrder()) {
     const way = WAYS[w];
