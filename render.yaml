@@ -16,6 +16,9 @@ services:
       # שלוחת הספרייה: השירים עצמם, ממוספרים 000, 001...
       - key: LIB_PATH
         value: "6"
+      # שירים שיורדו לספרייה בעלייה אם עוד אינם בה (גם בדיקה של כל המסלול)
+      - key: SEED_SONGS
+        value: "אדון עולם"
       - key: YEMOT_TOKEN
         sync: false
       - key: GEMINI_API_KEYS

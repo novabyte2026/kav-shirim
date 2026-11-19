@@ -923,6 +923,20 @@ app.get('/add', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// שירים שמורדים לספרייה בעלייה אם הם עוד לא שם (SEED_SONGS, מופרדים בפסיק).
+// משמש גם כבדיקה אמיתית של כל המסלול - הורדה, המרה והעלאה - בלי שיחה.
+async function seed() {
+  for (const q of list(env.SEED_SONGS)) {
+    try {
+      const items = await ytSearch(q);
+      if (!items.length) { log('[זריעה]', q, '- לא נמצא'); continue; }
+      const j = getJob(items[0]);
+      await j.promise;
+      log('[זריעה]', q, '->', j.state === 'done' ? 'בספרייה כ-' + j.n : 'נכשל: ' + j.err.slice(0, 200));
+    } catch (e) { log('[זריעה]', q, 'נכשל:', e.message); }
+  }
+}
+
 // ======================================================================
 // הפעלה
 // ======================================================================
@@ -933,7 +947,7 @@ function start() {
     log('עוגיות:', cookieInfo, '| PO Token:', POT || 'כבוי');
     ensureSilence();
     // בדיקה מלאה בעלייה (מופיעה בלוג של Render), ובדיקת יוטיוב כל 6 שעות
-    setTimeout(() => runChecks(true).catch(e => log('בדיקות:', e.message)), 15000);
+    setTimeout(() => runChecks(true).then(seed).catch(e => log('בדיקות:', e.message)), 15000);
     setInterval(() => runChecks(true).catch(() => {}), 6 * 3600000).unref();
     // שמירה על השירות ער: Render מרדים אחרי 15 דקות בלי בקשות מבחוץ.
     // פנייה לכתובת הציבורית של עצמנו עוברת דרך Render ונחשבת תנועה נכנסת.
