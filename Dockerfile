@@ -57,7 +57,6 @@ ENV NODE_ENV=production \
     FFMPEG_PATH=/usr/local/bin/ffmpeg \
     YTDLP_PATH=/usr/local/bin/yt-dlp \
     POT_BASE_URL=http://127.0.0.1:4416 \
-    DENO_V8_FLAGS=--max-old-space-size=128 \
     PORT=3000 \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
