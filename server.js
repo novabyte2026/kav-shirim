@@ -455,11 +455,116 @@ async function ytSearch(q) {
 // ======================================================================
 // הורדה: yt-dlp -> ffmpeg -> ימות
 // ======================================================================
-function ytdlpArgs(url, withCookies, outTpl) {
+// ----- זיכרון -----
+// Render מפיל את המכולה מעל 512MB, וזה מה שהרג שיחות בעבר: ספק ה-PO Token,
+// yt-dlp ו-Deno רצו יחד. לכן: נעילה אחת לכל פעולת יוטיוב, ספק ה-PO Token
+// עולה רק כשצריך ונכבה כשאין שימוש, ומדידת זיכרון בלוג.
+function cgroupMem() {
+  for (const f of ['/sys/fs/cgroup/memory.current', '/sys/fs/cgroup/memory/memory.usage_in_bytes']) {
+    try { return parseInt(fs.readFileSync(f, 'utf8'), 10); } catch (e) {}
+  }
+  return 0;
+}
+function cgroupPeak() {
+  for (const f of ['/sys/fs/cgroup/memory.peak', '/sys/fs/cgroup/memory/memory.max_usage_in_bytes']) {
+    try { return parseInt(fs.readFileSync(f, 'utf8'), 10); } catch (e) {}
+  }
+  return 0;
+}
+const MB = n => Math.round(n / 1048576) + 'MB';
+function memWatch() {
+  let peak = cgroupMem();
+  const t = setInterval(() => { peak = Math.max(peak, cgroupMem()); }, 500);
+  return () => { clearInterval(t); return peak; };
+}
+
+let ytChain = Promise.resolve();
+function ytLock(fn) {
+  const p = ytChain.then(fn, fn);
+  ytChain = p.catch(() => {});
+  return p;
+}
+
+// ----- ספק ה-PO Token: עולה לפי דרישה -----
+const POT_SCRIPT = env.POT_SCRIPT || '/opt/bgutil/build/main.js';
+const POT_IDLE_MS = int(env.POT_IDLE_MS, 240000, 30000, 3600000);
+let potProc = null, potReady = null, potTimer = null;
+function potStop() {
+  if (potProc) { try { potProc.kill('SIGTERM'); } catch (e) {} log('PO Token: נכבה (חוסך זיכרון)'); }
+  potProc = null; potReady = null;
+}
+async function potUp() {
+  if (!POT) return false;
+  clearTimeout(potTimer);
+  potTimer = setTimeout(potStop, POT_IDLE_MS);
+  const ping = () => http(POT + '/ping', {}, 3000).then(r => r.ok).catch(() => false);
+  if (potReady) return potReady;
+  potReady = (async () => {
+    if (await ping()) return true;              // רץ כבר (למשל הופעל מבחוץ)
+    if (!fs.existsSync(POT_SCRIPT)) { log('PO Token: אין', POT_SCRIPT); return false; }
+    const port = (POT.match(/:(\d+)/) || [])[1] || '4416';
+    potProc = spawn(process.execPath, ['--max-old-space-size=' + (env.POT_HEAP_MB || '128'), POT_SCRIPT, '--port', port], { stdio: 'ignore' });
+    potProc.on('exit', () => { potProc = null; potReady = null; });
+    const t0 = Date.now();
+    while (Date.now() - t0 < 40000) {
+      if (await ping()) { log('PO Token: עלה תוך', (Date.now() - t0) + 'ms'); return true; }
+      if (!potProc) break;
+      await sleep(700);
+    }
+    log('PO Token: לא עלה');
+    potStop();
+    return false;
+  })();
+  return potReady;
+}
+
+// ----- דרכי חילוץ, מהקלה לכבדה -----
+// light: עוגיות בלי ספק PO Token (לקוח tv לא דורש אותו) - הכי חסכוני בזיכרון
+// pot:   עוגיות + PO Token - הנוסחה שהוכחה בייצור
+// anon:  בלי עוגיות, עם PO Token - כשהעוגיות פגו
+const WAYS = {
+  light: { cookies: true, pot: false, clients: env.YT_CLIENTS_LIGHT || 'tv,web_safari' },
+  pot: { cookies: true, pot: true, clients: YT_CLIENTS },
+  anon: { cookies: false, pot: true, clients: '' }
+};
+const WAY_NAMES = { light: 'עוגיות', pot: 'עוגיות+PO', anon: 'בלי עוגיות' };
+let bestWay = env.YT_WAY || '';   // הדרך שעבדה לאחרונה - מנסים אותה ראשונה
+function wayOrder() {
+  const all = (COOKIE_FILE ? ['light', 'pot'] : []).concat(POT ? ['anon'] : []);
+  if (!all.length) all.push('anon');
+  return bestWay && all.includes(bestWay) ? [bestWay, ...all.filter(w => w !== bestWay)] : all;
+}
+
+async function tryWays(label, argsFor, okFn) {
+  let last = '';
+  for (const w of wayOrder()) {
+    const way = WAYS[w];
+    if (way.pot && !(await potUp())) { last = 'ספק PO Token לא זמין'; continue; }
+    const stop = memWatch();
+    const t0 = Date.now();
+    const r = await argsFor(way);
+    const peak = stop();
+    if (okFn(r)) {
+      if (bestWay !== w) log('yt-dlp: הדרך שעובדת עכשיו -', WAY_NAMES[w]);
+      bestWay = w;
+      log(label + ':', WAY_NAMES[w], (Date.now() - t0) + 'ms, שיא זיכרון', MB(peak));
+      return { way: w, r };
+    }
+    last = short((r.err || r.out).split('\n').filter(l => /ERROR|WARNING: \[youtube\].*(PO Token|cookies)/.test(l)).join(' | ') || r.err || r.out, 500);
+    log(label + ' נכשל (' + WAY_NAMES[w] + ', קוד ' + r.code + ', שיא ' + MB(peak) + '):', last);
+    if (classify(last) === 'unavailable') break;
+  }
+  const e = new Error(last || 'yt-dlp נכשל');
+  e.kind = classify(last);
+  throw e;
+}
+
+function ytdlpArgs(url, way, outTpl) {
   return [
     '--no-playlist', '--newline', '--no-colors', '--no-mtime',
-    ...(POT ? ['--extractor-args', 'youtubepot-bgutilhttp:base_url=' + POT] : []),
-    ...(withCookies ? ['--extractor-args', 'youtube:player_client=' + YT_CLIENTS, '--cookies', COOKIE_FILE] : []),
+    ...(way.pot && POT ? ['--extractor-args', 'youtubepot-bgutilhttp:base_url=' + POT] : []),
+    ...(way.clients ? ['--extractor-args', 'youtube:player_client=' + way.clients] : []),
+    ...(way.cookies && COOKIE_FILE ? ['--cookies', COOKIE_FILE] : []),
     ...(env.YT_JS_RUNTIMES ? ['--js-runtimes', env.YT_JS_RUNTIMES] : []),
     '--remote-components', env.YT_EJS || 'ejs:github',
     '--extractor-retries', '2', '--retries', '3', '--fragment-retries', '3',
@@ -498,28 +603,19 @@ function run(cmd, args, ms, onLine) {
 
 // פונקציות שהבדיקות המקומיות מחליפות (אין יוטיוב/ffmpeg מאחורי נטפרי)
 const media = {
-  async download(vid, dir, onPct) {
+  download(vid, dir, onPct) {
     const url = 'https://www.youtube.com/watch?v=' + vid;
-    const ways = COOKIE_FILE ? [true, false] : [false];
-    let last = '';
-    for (const withCookies of ways) {
-      const t0 = Date.now();
-      const r = await run(YTDLP, ytdlpArgs(url, withCookies, path.join(dir, 'src.%(ext)s')), DL_MS, line => {
-        const m = line.match(/\[download\]\s+([\d.]+)%/);
-        if (m) onPct(Math.min(99, Math.round(parseFloat(m[1]))));
-      });
-      const file = fs.readdirSync(dir).find(f => f.startsWith('src.') && !f.endsWith('.part'));
-      if (r.code === 0 && file) {
-        log('yt-dlp:', vid, withCookies ? 'עם עוגיות' : 'בלי עוגיות', (Date.now() - t0) + 'ms');
-        return path.join(dir, file);
-      }
-      last = short((r.err || r.out).split('\n').filter(l => /ERROR|WARNING: \[youtube\].*(PO Token|cookies)/.test(l)).join(' | ') || r.err || r.out, 500);
-      log('yt-dlp נכשל (' + (withCookies ? 'עם עוגיות' : 'בלי עוגיות') + ', קוד ' + r.code + '):', last);
-      if (classify(last) === 'unavailable') break;
-    }
-    const e = new Error(last || 'yt-dlp נכשל');
-    e.kind = classify(last);
-    throw e;
+    const found = () => fs.readdirSync(dir).find(f => f.startsWith('src.') && !/\.(part|ytdl)$/.test(f));
+    return ytLock(async () => {
+      await tryWays('הורדה ' + vid, way => {
+        for (const f of fs.readdirSync(dir)) fs.rmSync(path.join(dir, f), { force: true });
+        return run(YTDLP, ytdlpArgs(url, way, path.join(dir, 'src.%(ext)s')), DL_MS, line => {
+          const m = line.match(/\[download\]\s+([\d.]+)%/);
+          if (m) onPct(Math.min(99, Math.round(parseFloat(m[1]))));
+        });
+      }, r => r.code === 0 && !!found());
+      return path.join(dir, found());
+    });
   },
   async convert(src, out) {
     const r = await run(FFMPEG, ['-y', '-v', 'error', '-i', src, '-vn', '-t', String(MAX_SEC),
@@ -842,18 +938,13 @@ async function check(name, fn) {
 // בדיקת יוטיוב אמיתית: מחלץ סרטון קצר וידוע בלי להוריד אותו
 async function probeYoutube() {
   const vid = env.PROBE_VIDEO || 'jNQXAC9IVRw';
-  const tries = COOKIE_FILE ? [true, false] : [false];
-  const res = [];
-  for (const wc of tries) {
+  return ytLock(async () => {
     const t0 = Date.now();
-    const r = await run(YTDLP, ['--simulate', '--print', 'format_id',
-      ...ytdlpArgs('https://www.youtube.com/watch?v=' + vid, wc, path.join(os.tmpdir(), 'probe.%(ext)s'))], 150000);
-    const ok = r.code === 0 && /\S/.test(r.out);
-    const e = short((r.err.split('\n').find(l => /ERROR/.test(l)) || r.err), 200);
-    res.push((wc ? 'עם עוגיות' : 'בלי עוגיות') + ': ' + (ok ? 'עובד (' + (Date.now() - t0) + 'ms)' : 'נכשל - ' + (classify(e) === 'bot' ? 'חסימת בוט' : e)));
-    if (ok) return res.join(' | ');
-  }
-  throw new Error(res.join(' | '));
+    const { way } = await tryWays('בדיקת יוטיוב', w => run(YTDLP, ['--simulate', '--print', 'format_id',
+      ...ytdlpArgs('https://www.youtube.com/watch?v=' + vid, w, path.join(os.tmpdir(), 'probe.%(ext)s'))], 150000),
+    r => r.code === 0 && /\S/.test(r.out)).catch(e => { throw new Error((e.kind === 'bot' ? 'חסימת בוט - ' : '') + e.message); });
+    return 'עובד בדרך "' + WAY_NAMES[way] + '" (' + (Date.now() - t0) + 'ms)';
+  });
 }
 
 async function runChecks(full) {
@@ -887,13 +978,11 @@ async function runChecks(full) {
   });
   await check('PO Token', async () => {
     if (!POT) return 'כבוי';
-    const r = await http(POT + '/ping', {}, 8000).catch(() => null);
-    if (!r) throw new Error('לא מאזין ב-' + POT);
-    return 'מאזין';
+    if (!fs.existsSync(POT_SCRIPT)) throw new Error('לא מותקן: ' + POT_SCRIPT);
+    return 'מותקן, עולה לפי דרישה';
   });
   if (full) await check('הורדה מיוטיוב', probeYoutube);
-  const mb = n => Math.round(n / 1048576);
-  status.checks['משאבים'] = { ok: true, info: 'תהליך ' + mb(process.memoryUsage().rss) + 'MB, פנוי ' + mb(os.freemem()) + '/' + mb(os.totalmem()) + 'MB' };
+  status.checks['משאבים'] = { ok: true, info: 'מכולה ' + MB(cgroupMem()) + ' (שיא ' + MB(cgroupPeak()) + ') מתוך 512MB, השרת ' + MB(process.memoryUsage().rss) };
   log('[בדיקה] משאבים:', status.checks['משאבים'].info);
   status.ok = Object.values(status.checks).every(c => c.ok);
   log('[בדיקה] סיכום:', status.ok ? 'הכול תקין' : 'יש תקלות');
