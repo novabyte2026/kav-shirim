@@ -56,7 +56,19 @@ const FFMPEG = env.FFMPEG_PATH || 'ffmpeg';
 const POT = env.POT_BASE_URL === undefined ? 'http://127.0.0.1:4416' : String(env.POT_BASE_URL).trim();
 const YT_CLIENTS = env.YT_CLIENTS || 'tv,web_safari,mweb';
 const YT_FORMAT = env.YT_FORMAT || 'bestaudio[abr<=100]/bestaudio/18/best';
-const AUDIO_FILTER = String(env.AUDIO_FILTER || '').trim();
+// עיבוד שמע לטלפון. רץ אחרי ההמרה ל-8kHz מונו, ולכן זול גם על 0.1 מעבד.
+//   highpass/lowpass: חותכים מה שהקו הטלפוני ממילא לא מעביר (בס עמוק, גבוהים
+//     מעל 3.6kHz) כדי שהעוצמה תלך לתחום שנשמע.
+//   equalizer 2.5kHz +5dB: חידוד - מבליט קולות וכלים, פחות "עמום".
+//   acompressor: מצמצם את ההפרש בין חלקים שקטים לרועשים, ו-makeup מגביר.
+//   alimiter: מונע עיוות, ומיישר את הכול לעוצמה גבוהה אחידה.
+// AUDIO_FILTER=off מכבה, וכל ערך אחר מחליף את השרשרת.
+const AUDIO_DEFAULT = 'aresample=8000,aformat=channel_layouts=mono,highpass=f=140,lowpass=f=3600,' +
+  'equalizer=f=2500:t=q:w=1:g=5,acompressor=threshold=0.06:ratio=4:attack=5:release=150:makeup=3,' +
+  'alimiter=limit=0.9:level=enabled';
+const AUDIO_FILTER = env.AUDIO_FILTER === 'off' ? '' : String(env.AUDIO_FILTER || AUDIO_DEFAULT).trim();
+// גרסת העיבוד. שירים שעובדו בגרסה ישנה יותר מעובדים מחדש ברקע (AUDIO_UPGRADE=0 מכבה)
+const AUDIO_VER = AUDIO_FILTER ? 2 : 1;
 
 const REC_MAX = int(env.REC_MAX, 10, 3, 30);
 const MAX_SEC = int(env.SONG_MAX_MIN, 12, 1, 30) * 60;
@@ -254,7 +266,8 @@ async function libReserve() {
 
 // שמירות האינדקס רצות בתור, אחת אחרי השנייה
 function libAdd(vid, n, title) {
-  lib.items[vid] = { n, t: short(title, 120), d: Math.floor(Date.now() / 1000) };
+  const prev = lib.items[vid];
+  lib.items[vid] = { n, t: short(title, 120), d: prev ? prev.d : Math.floor(Date.now() / 1000), a: AUDIO_VER };
   lib.files.add(n);
   lib.reserved.delete(n);
   lib.saving = lib.saving.then(async () => {
@@ -267,16 +280,40 @@ function libAdd(vid, n, title) {
   return lib.saving;
 }
 
-// הגדרת שלוחת הספרייה כ"השמעת קבצים". נוגעים רק אם אין לה סוג אחר.
+// הגדרת שלוחת הספרייה. ברירת המחדל: שלוחת API של השרת (/library), עם תפריט
+// "שיר חדש / שירים קודמים" ודפדוף עם שמות השירים. LIB_MODE=playfile = השמעת
+// קבצים רגילה של ימות. נוגעים רק בשלוחה ריקה, playfile, או API שלנו.
+const SELF_URL = String(env.RENDER_EXTERNAL_URL || env.SELF_URL || '').replace(/\/$/, '');
+const API_EXT = clean(env.API_EXT || '7');
 async function libSetupExt() {
   if (env.LIB_AUTOSETUP === '0') return 'כבוי (LIB_AUTOSETUP=0)';
   const p = LIB + '/ext.ini';
   const cur = await readText(p);
-  const type = ((cur || '').match(/^\s*type\s*=\s*(\S+)/m) || [])[1];
-  if (type === 'playfile') return 'כבר מוגדרת כהשמעת קבצים';
-  if (type) return 'אזהרה: השלוחה מוגדרת כ-' + type + ' ולכן לא נגעתי בה. לשנות ידנית ל-type=playfile';
-  await writeText(p, (cur ? cur.replace(/\s+$/, '') + '\n' : '') + 'type=playfile\n');
-  return 'הוגדרה עכשיו כהשמעת קבצים (type=playfile)';
+  const type = ((cur || '').match(/^\s*type\s*=\s*(\S+)/m) || [])[1] || '';
+  const link = ((cur || '').match(/^\s*api_link\s*=\s*(\S+)/m) || [])[1] || '';
+  const mine = type === 'api' && /\/library$/.test(link);
+  if (type && type !== 'playfile' && !mine) {
+    return 'אזהרה: השלוחה מוגדרת כ-' + type + ' ולכן לא נגעתי בה';
+  }
+  if (env.LIB_MODE === 'playfile' || !SELF_URL) {
+    if (type === 'playfile') return 'השמעת קבצים רגילה';
+    await writeText(p, 'type=playfile\n');
+    return 'הוגדרה כהשמעת קבצים';
+  }
+  const want = SELF_URL + '/library';
+  if (mine && link === want) return 'תפריט ספרייה (API) פעיל';
+  await writeText(p, 'type=api\napi_link=' + want + '\n');
+  return 'הוגדרה עכשיו כתפריט ספרייה: ' + want;
+}
+
+// כל השירים שבספרייה, החדש ביותר ראשון
+async function libSongs() {
+  await libLoad();
+  const files = await libFiles(true);
+  const out = Object.values(lib.items).filter(it => files.has(it.n)).map(it => ({ n: it.n, t: it.t }));
+  const known = new Set(out.map(x => x.n));
+  for (const f of files) if (/^\d+$/.test(f) && !known.has(f)) out.push({ n: f, t: '' });
+  return out.sort((a, b) => parseInt(b.n, 10) - parseInt(a.n, 10));
 }
 
 // ======================================================================
@@ -302,10 +339,42 @@ function setupCookies() {
     const lines = body.split('\n').filter(l => l && (!l.startsWith('#') || l.startsWith('#HttpOnly_')));
     const login = /__Secure-3PSID|__Secure-1PSID|\tSID\t/.test(body);
     cookieInfo = lines.length + ' עוגיות' + (login ? ', כולל התחברות' : ', בלי עוגיית התחברות!');
+    cookieEnvHash = sha(raw);
+    cookieSaved = sha(fs.readFileSync(COOKIE_FILE, 'utf8'));
   } catch (e) {
     COOKIE_FILE = '';
     cookieInfo = 'פענוח נכשל: ' + e.message;
   }
+}
+
+// ----- שמירת העוגיות בחיים -----
+// yt-dlp כותב חזרה לקובץ העוגיות כל עדכון שיוטיוב שולחת. שומרים את הגרסה
+// המעודכנת בשלוחת העבודה בימות, ובעלייה הבאה טוענים אותה במקום הישנה שב-Render.
+// אם הודבקו ב-Render עוגיות חדשות (טביעה שונה) - הן גוברות.
+const sha = s => crypto.createHash('sha1').update(String(s)).digest('hex');
+const COOKIE_STORE = 'kavcookies.txt';
+let cookieEnvHash = '', cookieSaved = '', cookieStore = 'לא נבדק';
+async function cookiesFromStore() {
+  if (!COOKIE_FILE || !TOKEN) return (cookieStore = 'אין');
+  try {
+    const txt = await readText(WORK + '/' + COOKIE_STORE);
+    if (!txt) return (cookieStore = 'אין עותק שמור עדיין');
+    const j = JSON.parse(txt);
+    if (j.h !== cookieEnvHash) return (cookieStore = 'ב-Render יש עוגיות חדשות, הן בשימוש');
+    fs.writeFileSync(COOKIE_FILE, j.c);
+    cookieSaved = sha(j.c);
+    return (cookieStore = 'נטען עותק מעודכן מ-' + new Date(j.t * 1000).toISOString().slice(0, 16));
+  } catch (e) { return (cookieStore = 'קריאת העותק נכשלה: ' + e.message); }
+}
+async function cookiesPersist() {
+  if (!COOKIE_FILE || !TOKEN) return;
+  const c = fs.readFileSync(COOKIE_FILE, 'utf8');
+  if (!/__Secure-1PSID|__Secure-3PSID|\tSID\t/.test(c)) return; // לא שומרים קובץ בלי התחברות
+  const h = sha(c);
+  if (h === cookieSaved) return;
+  await writeText(WORK + '/' + COOKIE_STORE, JSON.stringify({ h: cookieEnvHash, c, t: Math.floor(Date.now() / 1000) }));
+  cookieSaved = h;
+  log('עוגיות: עודכנו ונשמרו בימות');
 }
 
 // ======================================================================
@@ -324,7 +393,7 @@ function sttModels() {
   modelsP = (async () => {
     const out = [...STT_PREF];
     try {
-      const r = await http(GBASE.replace(/\/$/, '') + '?pageSize=300', { headers: { 'x-goog-api-key': KEYS[0] } }, 12000);
+      const r = await http(GBASE.replace(/\/$/, '') + '?pageSize=300', { headers: keyHeaders(KEYS[0]) }, 12000);
       if (r.ok) {
         const j = await r.json();
         const have = new Set();
@@ -348,13 +417,38 @@ function sttModels() {
   return modelsP;
 }
 
+// מפתחות: AIza... נשלח ככותרת x-goog-api-key. אם גוגל דוחה (למשל מפתח מסוג
+// אחר כמו AQ...), מנסים אותו כ-Bearer. האופן שעבד נזכר לכל מפתח.
+const keyMode = {};
+const keyHeaders = key => (keyMode[key] === 'bearer' ? { Authorization: 'Bearer ' + key } : { 'x-goog-api-key': key });
+const mask = k => '...' + String(k).slice(-4);
+async function checkKeys() {
+  const good = [], bad = [];
+  for (const key of [...KEYS]) {
+    let ok = false, why = '';
+    for (const mode of ['header', 'bearer']) {
+      keyMode[key] = mode;
+      try {
+        const r = await http(GBASE.replace(/\/$/, '') + '?pageSize=1', { headers: keyHeaders(key) }, 10000);
+        if (r.ok) { ok = true; break; }
+        why = r.status + ' ' + short(await r.text(), 80);
+      } catch (e) { why = e.message; }
+    }
+    if (ok) good.push(mask(key) + (keyMode[key] === 'bearer' ? ' (Bearer)' : ''));
+    else { bad.push(mask(key) + ': ' + why); delete keyMode[key]; }
+  }
+  // מוציאים מהסבב מפתחות פסולים, אבל לא נשארים בלי כלום
+  if (good.length) for (let i = KEYS.length - 1; i >= 0; i--) if (!keyMode[KEYS[i]]) KEYS.splice(i, 1);
+  return { good, bad };
+}
+
 let keyRot = 0;
 async function geminiOnce(model, key, audioB64) {
   const gen = { temperature: 0, maxOutputTokens: 80 };
   if (!noThink.has(model)) gen.thinkingConfig = { thinkingBudget: 0 };
   const r = await http(GBASE + model + ':generateContent', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+    headers: { 'Content-Type': 'application/json', ...keyHeaders(key) },
     body: JSON.stringify({
       contents: [{ role: 'user', parts: [{ text: STT_PROMPT }, { inlineData: { mimeType: 'audio/wav', data: audioB64 } }] }],
       generationConfig: gen
@@ -547,6 +641,7 @@ async function tryWays(label, argsFor, okFn) {
     if (okFn(r)) {
       if (bestWay !== w) log('yt-dlp: הדרך שעובדת עכשיו -', WAY_NAMES[w]);
       bestWay = w;
+      if (way.cookies) cookiesPersist().catch(e => log('עוגיות: שמירה נכשלה -', e.message));
       log(label + ':', WAY_NAMES[w], (Date.now() - t0) + 'ms, שיא זיכרון', MB(peak));
       return { way: w, r };
     }
@@ -618,14 +713,37 @@ const media = {
     });
   },
   async convert(src, out) {
-    const r = await run(FFMPEG, ['-y', '-v', 'error', '-i', src, '-vn', '-t', String(MAX_SEC),
-      ...(AUDIO_FILTER ? ['-af', AUDIO_FILTER] : []),
+    const once = filter => run(FFMPEG, ['-y', '-v', 'error', '-i', src, '-vn', '-t', String(MAX_SEC),
+      ...(filter ? ['-af', filter] : []),
       '-ac', '1', '-ar', '8000', '-c:a', 'pcm_s16le', out], DL_MS);
-    const size = fs.existsSync(out) ? fs.statSync(out).size : 0;
+    const sizeOf = () => (fs.existsSync(out) ? fs.statSync(out).size : 0);
+    let r = await once(AUDIO_FILTER);
+    // אם שרשרת העיבוד נכשלת - לא מוותרים על השיר, ממירים בלי עיבוד
+    if ((r.code !== 0 || sizeOf() < 16000) && AUDIO_FILTER) {
+      log('עיבוד שמע נכשל, ממיר בלי עיבוד:', short(r.err, 200));
+      r = await once('');
+    }
+    const size = sizeOf();
     if (r.code !== 0 || size < 16000) throw new Error('המרה נכשלה (קוד ' + r.code + ') ' + short(r.err, 300));
     return size;
   }
 };
+
+// בדיקת העיבוד בלי יוטיוב: טון מסונתז, לפני ואחרי. מראה בלוג שהשרשרת תקינה
+// ובכמה היא מגבירה.
+async function audioSelfTest() {
+  if (!AUDIO_FILTER) return 'עיבוד שמע כבוי';
+  const meas = async filter => {
+    const r = await run(FFMPEG, ['-hide_banner', '-f', 'lavfi', '-i', 'sine=frequency=800:duration=4,volume=0.3',
+      '-af', (filter ? filter + ',' : '') + 'volumedetect', '-f', 'null', '-'], 30000);
+    const m = r.err.match(/mean_volume:\s*(-?[\d.]+)/);
+    if (r.code !== 0 || !m) throw new Error('השרשרת נכשלה: ' + short(r.err.split('\n').filter(l => /rror|nvalid/.test(l)).join(' ') || r.err, 200));
+    return parseFloat(m[1]);
+  };
+  const before = await meas('aresample=8000');
+  const after = await meas(AUDIO_FILTER);
+  return 'תקין: עוצמה ממוצעת ' + before + 'dB -> ' + after + 'dB';
+}
 
 // ======================================================================
 // תור הורדות: אחת בכל פעם (המעבד של Render חלש), בלי כפילויות
@@ -635,13 +753,23 @@ const queue = [];
 let busy = false;
 let lastBot = 0;          // מתי יוטיוב חסם אותנו לאחרונה
 
-function getJob(track) {
+// redo = מספר קיים בספרייה שצריך לעבד מחדש (שדרוג שמע), באותו מספר
+function getJob(track, redo) {
   let j = jobs.get(track.id);
-  if (j && j.state !== 'fail') return j;
-  j = { vid: track.id, title: track.title, state: 'queued', pct: 0, err: '', kind: '', n: '', t0: Date.now() };
+  if (j && j.state !== 'fail' && !(redo && j.state === 'done')) {
+    // מתקשר מבקש שיר שממתין לשדרוג ברקע - מקדמים אותו לראש התור
+    if (!redo && j.redo && j.state === 'queued') {
+      const k = queue.indexOf(j);
+      if (k > 0) { queue.splice(k, 1); queue.unshift(j); }
+    }
+    return j;
+  }
+  j = { vid: track.id, title: track.title, state: 'queued', pct: 0, err: '', kind: '', n: '', redo: redo || '', t0: Date.now() };
   j.promise = new Promise(res => { j.resolve = res; });
   jobs.set(track.id, j);
-  queue.push(j);
+  // בקשות של מתקשרים קודמות לשדרוגים שברקע
+  if (redo) queue.push(j);
+  else { const k = queue.findIndex(x => x.redo); k < 0 ? queue.push(j) : queue.splice(k, 0, j); }
   pump();
   return j;
 }
@@ -668,8 +796,10 @@ async function pump() {
 }
 
 async function doJob(j) {
-  const have = await libHas(j.vid);
-  if (have) { j.state = 'done'; j.n = have.n; return; }
+  if (!j.redo) {
+    const have = await libHas(j.vid);
+    if (have) { j.state = 'done'; j.n = have.n; return; }
+  }
   j.state = 'run';
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kav-'));
   const t0 = Date.now();
@@ -682,14 +812,14 @@ async function doJob(j) {
     const size = await media.convert(src, out);
     try { fs.unlinkSync(src); } catch (e) {}
     j.state = 'upload';
-    n = await libReserve();
+    n = j.redo || await libReserve();
     await uploadAudio(LIB + '/' + n + '.wav', fs.readFileSync(out), 240000);
     await libAdd(j.vid, n, j.title);
     j.n = n;
     j.state = 'done';
-    log('נשמר בספרייה:', n, '|', j.title, '|', Math.round(size / 1024) + 'KB', (Date.now() - t0) + 'ms');
+    log(j.redo ? 'עובד מחדש בספרייה:' : 'נשמר בספרייה:', n, '|', j.title, '|', Math.round(size / 1024) + 'KB', (Date.now() - t0) + 'ms');
   } finally {
-    if (n && j.state !== 'done') lib.reserved.delete(n);
+    if (n && !j.redo && j.state !== 'done') lib.reserved.delete(n);
     fs.rm(dir, { recursive: true, force: true }, () => {});
   }
 }
@@ -720,9 +850,9 @@ const M = {
   notFound: 'לא מצאתי שיר מתאים. אמרו שם אחר ובסיום הקישו סולמית',
   err: 'הייתה תקלה. אמרו שוב את שם השיר ובסיום הקישו סולמית',
   voice: 'אמרו שוב את שם השיר',
-  menu: 'להשמעה עכשיו הקישו 1. לשמירה בספרייה הקישו 2. לתוצאה הבאה הקישו 3. לחיפוש אחר הקישו 4',
+  menu: 'להשמעה עכשיו הקישו 1. לשמירה בספרייה הקישו 2. לתוצאה הבאה הקישו 3. לחיפוש אחר הקישו 4. לתפריט הראשי הקישו 0',
   dl: 'מוריד את השיר. זה לוקח בערך דקה. כדי לא לחכות הקישו 9, והשיר יישמר בספרייה',
-  after: 'לשמיעה חוזרת הקישו 1. לשיר אחר הקישו 2. לספריית השירים הקישו 6'
+  after: 'לשמיעה חוזרת הקישו 1. לשיר אחר הקישו 2. לספריית השירים הקישו 6. לתפריט הראשי הקישו 0'
 };
 
 function askRec(s, msg) {
@@ -837,6 +967,7 @@ async function step(s, q) {
       }
       if (key === '3') { s.i = (s.i + 1) % s.items.length; s.miss = 0; return menuFor(s); }
       if (key === '4') return askRec(s, M.ask);
+      if (key === '0') return 'go_to_folder=/';
       if (key === '2') {
         const j = getJob(t);
         const msg = j.state === 'done' ? 'השיר כבר נמצא בספרייה' : 'השיר יורד ויישמר בספרייה בשלוחה ' + LIB + ' בעוד כדקה';
@@ -880,12 +1011,74 @@ async function step(s, q) {
     case 'after': {
       if (key === '1' && s.playing) return playNow(s, s.playing);
       if (key === '6') return 'go_to_folder=/' + LIB;
+      if (key === '0') return 'go_to_folder=/';
       return askRec(s, M.ask);
     }
     default:
       return askRec(s, M.greet);
   }
 }
+
+// ======================================================================
+// שלוחת הספרייה (/library): שיר חדש, או דפדוף בשירים הקודמים עם שמותיהם
+// ======================================================================
+const LM = {
+  menu: 'לבקשת שיר חדש הקישו 1. לשירים הקודמים הקישו 2. לתפריט הראשי הקישו 0',
+  keys: 'בזמן השיר. לשיר הבא הקישו 3. לשיר הקודם 1. לשמיעה חוזרת 2. לשיר חדש 4. לתפריט הספרייה 0'
+};
+
+async function libMenu(s, pre) {
+  let count = 0;
+  try { count = (await libSongs()).length; } catch (e) { log('ספרייה:', e.message); }
+  s.count = count;
+  const head = pre || ('ספריית השירים. ' + (count ? 'יש בה ' + count + ' שירים' : 'היא עדיין ריקה'));
+  return askKey(s, 'lmenu', [T(head), T(LM.menu)], 7);
+}
+
+function libPlay(s, intro) {
+  const L = s.list;
+  s.i = ((s.i % L.length) + L.length) % L.length;
+  const it = L[s.i];
+  const msgs = [];
+  if (intro) msgs.push(T(intro));
+  msgs.push(T('שיר ' + (s.i + 1) + ' מתוך ' + L.length + (it.t ? '. ' + it.t : '')));
+  msgs.push('f-/' + LIB + '/' + it.n);
+  // 3 שניות להקשה אחרי השיר; בלי הקשה ממשיכים לבא בתור, כמו רשימת השמעה
+  return askKey(s, 'lplay', msgs, 3);
+}
+
+async function libStep(s, q) {
+  const key = keyOf(q[s.p]);
+  if (s.stage === 'lmenu') {
+    if (key === '1') return 'go_to_folder=/' + API_EXT;
+    if (key === '0') return 'go_to_folder=/';
+    if (key === '2') {
+      s.list = await libSongs();
+      if (!s.list.length) return libMenu(s, 'אין עדיין שירים בספרייה');
+      s.i = 0;
+      return libPlay(s, LM.keys);
+    }
+    s.miss = (s.miss || 0) + 1;
+    if (s.miss >= 3) return 'go_to_folder=/';
+    return libMenu(s);
+  }
+  if (s.stage === 'lplay') {
+    if (key === '0') { s.miss = 0; return libMenu(s); }
+    if (key === '4') return 'go_to_folder=/' + API_EXT;
+    if (key === '2') return libPlay(s);
+    if (key === '1') { s.i--; return libPlay(s); }
+    s.i++;                                           // 3 או סיום השיר
+    if (s.i >= s.list.length) { s.i = 0; return libPlay(s, 'חזרה לשיר הראשון'); }
+    return libPlay(s);
+  }
+  return libMenu(s);
+}
+
+const lcalls = {};
+setInterval(() => {
+  const now = Date.now();
+  for (const id of Object.keys(lcalls)) if (now - lcalls[id].t > 3 * 3600000) delete lcalls[id];
+}, 600000).unref();
 
 // ======================================================================
 // כתובות
@@ -922,6 +1115,28 @@ app.all('/yemot', async (req, res) => {
     out = 'id_list_message=' + T('הייתה תקלה בקו. נסו שוב');
   }
   if (env.LOG_IVR === '1') log('ימות', id.slice(-6), (Date.now() - t0) + 'ms', short(out, 160));
+  res.send(out);
+});
+
+app.all('/library', async (req, res) => {
+  const q = { ...req.query, ...req.body };
+  const id = idOf(q);
+  res.type('text/plain');
+  let out = '';
+  try {
+    if (q.hangup === 'yes') { delete lcalls[id]; out = 'noop=bye'; }
+    else if (!lcalls[id]) {
+      const s = lcalls[id] = { e: crypto.randomBytes(3).toString('hex'), n: 0, t: Date.now(), stage: '' };
+      out = await libMenu(s);
+    } else {
+      lcalls[id].t = Date.now();
+      out = await libStep(lcalls[id], q);
+    }
+  } catch (e) {
+    log('שגיאה בספרייה', id.slice(-8), e && e.message);
+    out = 'id_list_message=' + T('הייתה תקלה בספרייה. נסו שוב');
+  }
+  if (env.LOG_IVR === '1') log('ספרייה', id.slice(-6), short(out, 160));
   res.send(out);
 });
 
@@ -964,8 +1179,11 @@ async function runChecks(full) {
   });
   await check('ג׳מיני', async () => {
     if (!KEYS.length) throw new Error('GEMINI_API_KEYS ריק');
+    const { good, bad } = await checkKeys();
+    if (!good.length) throw new Error('אף מפתח לא עובד: ' + bad.join(' | '));
     const m = await sttModels();
-    return KEYS.length + ' מפתחות. מודלים: ' + m.join(', ');
+    return good.length + ' מפתחות עובדים (' + good.join(', ') + ')' +
+      (bad.length ? '. פסולים והוצאו: ' + bad.join(' | ') : '') + '. מודלים: ' + m.join(', ');
   });
   await check('חיפוש יוטיוב', async () => {
     const r = await ytSearch('אדון עולם');
@@ -974,8 +1192,9 @@ async function runChecks(full) {
   });
   await check('עוגיות', async () => {
     if (!COOKIE_FILE) throw new Error(cookieInfo);
-    return cookieInfo;
+    return cookieInfo + '. עותק בימות: ' + cookieStore;
   });
+  await check('עיבוד שמע', audioSelfTest);
   await check('PO Token', async () => {
     if (!POT) return 'כבוי';
     if (!fs.existsSync(POT_SCRIPT)) throw new Error('לא מותקן: ' + POT_SCRIPT);
@@ -1026,6 +1245,17 @@ async function seed() {
   }
 }
 
+// שירים שעובדו בגרסת שמע ישנה (חלשה יותר) - מורדים ומעובדים מחדש ברקע,
+// באותו מספר בספרייה. בקשות של מתקשרים תמיד קודמות להם בתור.
+async function upgradeAudio() {
+  if (env.AUDIO_UPGRADE === '0' || !AUDIO_FILTER) return;
+  await libLoad();
+  const old = Object.entries(lib.items).filter(([, it]) => (it.a || 1) < AUDIO_VER);
+  if (!old.length) return;
+  log('[שדרוג שמע]', old.length, 'שירים יעובדו מחדש ברקע');
+  for (const [vid, it] of old) getJob({ id: vid, title: it.t }, it.n);
+}
+
 // ======================================================================
 // הפעלה
 // ======================================================================
@@ -1036,7 +1266,10 @@ function start() {
     log('עוגיות:', cookieInfo, '| PO Token:', POT || 'כבוי');
     ensureSilence();
     // בדיקה מלאה בעלייה (מופיעה בלוג של Render), ובדיקת יוטיוב כל 6 שעות
-    setTimeout(() => runChecks(true).then(seed).catch(e => log('בדיקות:', e.message)), 15000);
+    setTimeout(() => cookiesFromStore()
+      .then(m => log('עוגיות (עותק בימות):', m))
+      .then(() => runChecks(true)).then(seed).then(upgradeAudio)
+      .catch(e => log('בדיקות:', e.message)), 15000);
     setInterval(() => runChecks(true).catch(() => {}), 6 * 3600000).unref();
     // שמירה על השירות ער: Render מרדים אחרי 15 דקות בלי בקשות מבחוץ.
     // פנייה לכתובת הציבורית של עצמנו עוברת דרך Render ונחשבת תנועה נכנסת.
