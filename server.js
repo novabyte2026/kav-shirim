@@ -1197,7 +1197,52 @@ const lcalls = {};
 setInterval(() => {
   const now = Date.now();
   for (const id of Object.keys(lcalls)) if (now - lcalls[id].t > 3 * 3600000) delete lcalls[id];
+  for (const id of Object.keys(gates)) if (now - gates[id].t > 3 * 3600000) delete gates[id];
 }, 600000).unref();
+
+// ======================================================================
+// מי רשאי להתקשר. נשלט מהגדרות Render, בלי לגעת בקוד:
+//   ALLOWED_PHONES = מספרים שנכנסים ישר, מופרדים בפסיק (050-1234567, +972..., הכול עובד)
+//   ACCESS_PIN     = קוד כניסה למי שלא ברשימה (או לכולם, אם אין רשימה)
+// שניהם ריקים = הקו פתוח לכולם. רשימה בלי קוד = מי שלא ברשימה לא נכנס.
+// ההגדרות נקראות בכל שיחה, אז שינוי ב-Render תופס מיד אחרי העלייה מחדש.
+// ההרשאה נשמרת לכל השיחה, כך שמי שהקיש קוד בשלוחה 7 לא יתבקש שוב בספרייה.
+// ======================================================================
+const normPhone = p => { let d = String(p || '').replace(/\D/g, ''); if (d.startsWith('972')) d = '0' + d.slice(3); return d; };
+function accessCfg() {
+  const list = String(env.ALLOWED_PHONES || '').split(/[\s,;]+/).map(normPhone).filter(x => x.length >= 7);
+  const pin = String(env.ACCESS_PIN || '').replace(/\D/g, '');
+  return { list, pin, on: list.length > 0 || !!pin };
+}
+const gates = {};
+const PRIVATE = () => 'id_list_message=' + T('זה קו פרטי. להתראות') + '&go_to_folder=hangup';
+function askPin(g, c, msg) {
+  g.n++;
+  g.p = 'A' + g.e + g.n;
+  // אורך הקלט = אורך הקוד, כך שאין צורך בסולמית. כוכבית חסומה.
+  return 'read=' + T(msg) + '=' + g.p + ',no,' + c.pin.length + ',' + c.pin.length + ',10,No,yes,no';
+}
+// מחזיר null אם המתקשר רשאי להמשיך, אחרת את התשובה לימות
+function gate(q, id) {
+  const c = accessCfg();
+  if (!c.on) return null;
+  let g = gates[id];
+  if (g && g.ok) return null;
+  const phone = normPhone(q.ApiPhone);
+  const tail = phone ? '...' + phone.slice(-4) : 'חסוי';
+  if (!g) {
+    if (phone && c.list.includes(phone)) { gates[id] = { ok: true, t: Date.now() }; return null; }
+    if (!c.pin) { log('גישה: נחסם מתקשר שלא ברשימה', tail); gates[id] = { ok: false, t: Date.now(), closed: true }; return PRIVATE(); }
+    g = gates[id] = { ok: false, tries: 0, e: crypto.randomBytes(3).toString('hex'), n: 0, t: Date.now() };
+    return askPin(g, c, 'זה קו פרטי. הקישו את קוד הכניסה');
+  }
+  if (g.closed) return PRIVATE();
+  const v = String(q[g.p] == null ? '' : q[g.p]).replace(/\D/g, '');
+  if (v && v === c.pin) { g.ok = true; log('גישה: קוד נכון', tail); return null; }
+  g.tries++;
+  if (g.tries >= 3) { g.closed = true; log('גישה: 3 קודים שגויים', tail); return PRIVATE(); }
+  return askPin(g, c, 'הקוד שגוי. נסו שוב');
+}
 
 // ======================================================================
 // כתובות
@@ -1217,6 +1262,8 @@ app.all('/yemot', async (req, res) => {
     if (q.hangup === 'yes') {
       if (calls[id]) { cleanupCall(calls[id]); delete calls[id]; }
       out = 'noop=bye';
+    } else if ((out = gate(q, id))) {
+      // לא רשאי (עדיין): בקשת קוד או "קו פרטי"
     } else {
       let s = calls[id];
       if (!s) {
@@ -1244,6 +1291,7 @@ app.all('/library', async (req, res) => {
   let out = '';
   try {
     if (q.hangup === 'yes') { delete lcalls[id]; out = 'noop=bye'; }
+    else if ((out = gate(q, id))) { /* לא רשאי (עדיין) */ }
     else if (!lcalls[id]) {
       const s = lcalls[id] = { e: crypto.randomBytes(3).toString('hex'), n: 0, t: Date.now(), stage: '' };
       out = await libMenu(s);
@@ -1317,6 +1365,12 @@ async function runChecks(full) {
     return cookieInfo + '. עותק בימות: ' + cookieStore;
   });
   await check('עיבוד שמע', audioSelfTest);
+  await check('גישה', async () => {
+    const c = accessCfg();
+    if (!c.on) return 'פתוח לכולם (ALLOWED_PHONES ו-ACCESS_PIN ריקים)';
+    return (c.list.length ? c.list.length + ' מספרים מורשים' : 'אין רשימה') + ', ' +
+      (c.pin ? 'קוד כניסה של ' + c.pin.length + ' ספרות' : 'בלי קוד - מי שלא ברשימה נחסם');
+  });
   await check('PO Token', async () => {
     if (!POT) return 'כבוי';
     if (!fs.existsSync(POT_SCRIPT)) throw new Error('לא מותקן: ' + POT_SCRIPT);
