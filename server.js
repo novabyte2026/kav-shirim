@@ -1204,7 +1204,10 @@ async function runChecks(full) {
     const setup = await libSetupExt();
     await libLoad();
     const files = await libFiles(true);
-    return 'שלוחה /' + LIB + ', ' + files.size + ' קבצים, ' + Object.keys(lib.items).length + ' באינדקס. ' + setup;
+    const known = new Set(Object.values(lib.items).map(it => it.n));
+    const extra = [...files].filter(f => !known.has(f));
+    return 'שלוחה /' + LIB + ', ' + files.size + ' קבצים, ' + Object.keys(lib.items).length + ' באינדקס' +
+      (extra.length ? ' (קבצים נוספים: ' + extra.slice(0, 12).join(', ') + ')' : '') + '. ' + setup;
   });
   await check('ג׳מיני', async () => {
     if (!KEYS.length) throw new Error('GEMINI_API_KEYS ריק');
